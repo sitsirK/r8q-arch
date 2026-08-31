@@ -1,8 +1,10 @@
 [Unit]
-Description=r8q touchscreen (geni i2c + FTS5CU56A) module load
+Description=r8q touchscreen (geni i2c + FTS5CU56A / Zinitix ZT7650) module load
 # Same cold-load pattern as r8q-gpu.service: modules live outside
 # /lib/modules (udev coldplug stays disabled), loaded once per boot.
+# Either driver having bound already means there is nothing to do.
 ConditionPathExists=!/sys/bus/i2c/drivers/fts5cu56a/5-0049
+ConditionPathExists=!/sys/bus/i2c/drivers/Zinitix-TS/5-0020
 
 [Service]
 Type=oneshot
@@ -10,6 +12,11 @@ ExecStart=/usr/bin/insmod /root/ts/gpi.ko
 ExecStart=/usr/bin/insmod /root/ts/i2c-qcom-geni.ko r8q_force_fifo=1
 ExecStart=/bin/sh -c 'sleep 2'
 ExecStart=/usr/bin/insmod /root/ts/fts5cu56a.ko
+# r8q is dual-sourced: a unit without the STM part at 0x49 carries a Zinitix
+# ZT7650 at 0x20 instead. Only fall back to it when the STM did not bind, so an
+# STM unit never loads a second touch driver. Non-fatal ("-") because
+# r8q-battery.service Requires= this unit and zinitix.ko is optional.
+ExecStart=-/bin/sh -c '[ -e /sys/bus/i2c/drivers/fts5cu56a/5-0049 ] || insmod /root/ts/zinitix.ko'
 RemainAfterExit=yes
 
 [Install]

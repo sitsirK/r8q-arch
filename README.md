@@ -35,14 +35,13 @@ into.
 | 5 | **SSH over USB** — `ssh root@172.16.42.1`, plus **USB tethering** (internet + `pacman`) | ✅ |
 | 6 | **GPU acceleration** — Adreno 650 via freedreno/turnip (GLES 3.2 + Vulkan 1.3) | ✅ |
 | 7 | **GNOME 50** on the panel — gdm autologin, mutter rendering on the Adreno (sway still available as a fallback) | ✅ |
-| 8 | **Touchscreen** — STM FTS5CU56A multitouch, working under Plasma Mobile and GNOME | ✅ |
+| 8 | **Touchscreen** — STM FTS5CU56A multitouch, working under Plasma Mobile and GNOME; the Zinitix ZT7650 variant works too | ✅ |
 | 9 | **Faster boot** — console `loglevel=3` (dropped `ignore_loglevel`) + a printk sysctl the initramfs can't override; ~12 s to userspace | ✅ |
 | 10 | **Volume-Up key** — remapped to `pm8150l_gpios` gpio3, emits `KEY_VOLUMEUP` | ✅ |
 | 11 | **Battery** — MAX77705 fuel gauge (`max17042`) telemetry **+ charging** (`max77705` MFD + charger) | ✅ |
 | 12 | **Wi-Fi** — QCA6390 over PCIe via `ath11k_pci` + MHI; `wlp1s0` scans and associates | ✅ |
 | 13 | **KDE Plasma Mobile** — `sddm` autologin → mobile shell on the Adreno, ~12 s cold boot (GNOME still installed as a fallback) | ✅ |
 | 14 | **CPU wedge root-caused** — the "phone dies under load" bug is `cpu7` never returning from `cpu-sleep-1-0` power collapse; that idle state is now disabled on cpus 4-7 | ✅ fix holding (first 50 min session clean; longer soak still welcome) |
-| 15 | **Camera (partial)** — rear telephoto (SK hynix Hi-847) through CAMSS and libcamera's software ISP on the Adreno; live in `plasma-camera` and GNOME Snapshot | ⚠️ one lens only, no autofocus, no manual exposure in-app |
 
 See the [**Roadmap**](#roadmap) below for what's next (Bluetooth, USB host mode,
 audio, a greeter/lock screen).
@@ -142,6 +141,20 @@ sequence, and the 16-byte FIFO event format). Two quirks make the bus usable:
 the SE5 GPI-DMA channels are TrustZone-owned and its FIFO writes hang, so
 `patches/0003` adds `i2c-qcom-geni.r8q_force_fifo=1` (skip GPI, route data
 through the SE-DMA path). `r8q-touch.service` loads the stack after boot.
+
+r8q is **dual-sourced**: Samsung's overlay puts two touch controllers on i2c5 —
+the STM part at 0x49 and a **Zinitix ZT7650 at 0x20** — and only the one that is
+fitted answers. Both DT nodes stay enabled and each driver checks for its own
+chip before registering anything, so a single DTB covers both variants (they
+also share one interrupt line, so a driver binding to a chip that is not there
+would take the IRQ from the one that should have it). Mainline's `zinitix`
+driver only knows the older BT4xx/BT5xx generation, so `patches/0007` adds the
+ZT7650: the vendor commands moved, the touch points moved from 0x0080 to 0x0200
+and became one 16-byte event per contact with 12-bit packed coordinates, and
+"point mode" is 0 rather than 2. `r8q-touch.service` only loads `zinitix.ko`
+when the STM part did not bind. The ZT7650 path is **confirmed working on a
+ZT7650-fitted r8q** (tested by an owner of one — this phone has the STM part);
+on an STM unit the zinitix probe declines cleanly and touch is unaffected.
 
 Touch **follows display rotation** (portrait and landscape both land correctly).
 That took making the display look like a real built-in panel — see below.

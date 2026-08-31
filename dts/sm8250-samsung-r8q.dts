@@ -60,12 +60,6 @@
 	};
 
 	/*
-	 * EB-BG781ABY pack (4500 mAh typ). The MAX77705 charger driver only
-	 * consumes voltage-max-design (it programs that as the CV float target);
-	 * the rest is informational. 4350 mV float is a conservative, standard
-	 * Li-ion CV -- below Samsung's stock 4380 mV -- for first bring-up.
-	 */
-	/*
 	 * Camera power, rear telephoto module (downstream "RCAM3_LDO_EN",
 	 * fragment@184). Like the TSP rail this is a discrete LDO switched by a
 	 * TLMM pin, not a PMIC output: the stock cam-sensor node takes only
@@ -83,6 +77,12 @@
 		startup-delay-us = <1000>;
 	};
 
+	/*
+	 * EB-BG781ABY pack (4500 mAh typ). The MAX77705 charger driver only
+	 * consumes voltage-max-design (it programs that as the CV float target);
+	 * the rest is informational. 4350 mV float is a conservative, standard
+	 * Li-ion CV -- below Samsung's stock 4380 mV -- for first bring-up.
+	 */
 	battery: battery {
 		compatible = "simple-battery";
 		voltage-max-design-microvolt = <4350000>;
@@ -108,13 +108,27 @@
 
 	/*
 	 * r8q ships two TSP variants (downstream fragment@178 on
-	 * qupv3_se5_i2c, both status "ok"); only the fitted one ACKs.
-	 * Zinitix ZT7650 is not in the mainline zinitix of_match; bt541 is
-	 * a protocol-family guess. The 0x49 part is STM FTS5CU56A (Samsung
-	 * "stm,fts_touch"); s6sy761/stmfts are the candidate protocols.
+	 * qupv3_se5_i2c, both status "ok"): a Zinitix ZT7650 at 0x20 and an
+	 * STM FTS5CU56A at 0x49. Only the fitted one ACKs, so both nodes stay
+	 * enabled and each driver checks for its own chip before registering
+	 * anything (patches/0007 adds that check to zinitix; fts5cu56a always
+	 * had one). THIS unit is the STM; the Zinitix path is untested.
+	 *
+	 * Zinitix ZT7650 (needs patches/0007 -- the mainline zinitix driver
+	 * knows the BT4xx/BT5xx generation only). Stock DT values:
+	 * zinitix,x_resolution = <1080>, y_resolution = <2400> -- this
+	 * controller reports panel pixels rather than raw counts, and the
+	 * driver uses these only to size the input axes (unlike the BT5xx
+	 * path it does not program them into the chip). No zinitix,mode:
+	 * point mode is 0 on this generation and the driver defaults to it.
+	 * IRQ flags are the stock ones (irq_type 0x2008 = ONESHOT|LEVEL_LOW).
+	 *
+	 * The gpio15 pinctrl state lives here rather than on both nodes
+	 * because two devices cannot claim the same pin group; a failed
+	 * zinitix probe releases it again for the STM.
 	 */
 	touchscreen@20 {
-		compatible = "zinitix,bt541";
+		compatible = "zinitix,zt7650";
 		reg = <0x20>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <15 IRQ_TYPE_LEVEL_LOW>;
@@ -124,7 +138,6 @@
 		pinctrl-0 = <&ts_int_default>;
 		touchscreen-size-x = <1080>;
 		touchscreen-size-y = <2400>;
-		zinitix,mode = <2>;
 	};
 
 	touchscreen@49 {
