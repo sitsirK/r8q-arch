@@ -65,6 +65,24 @@
 	 * the rest is informational. 4350 mV float is a conservative, standard
 	 * Li-ion CV -- below Samsung's stock 4380 mV -- for first bring-up.
 	 */
+	/*
+	 * Camera power, rear telephoto module (downstream "RCAM3_LDO_EN",
+	 * fragment@184). Like the TSP rail this is a discrete LDO switched by a
+	 * TLMM pin, not a PMIC output: the stock cam-sensor node takes only
+	 * cam_vio from the PMIC (pm8150L L7, 1.8 V) and gets analog + core off
+	 * this one enable line. 2.8 V is the module's AVDD; the sensor driver
+	 * never reads the voltage back, it only needs the enable.
+	 */
+	vreg_cam_tele: regulator-cam-tele {
+		compatible = "regulator-fixed";
+		regulator-name = "rcam3_ldo_en";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 135 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
 	battery: battery {
 		compatible = "simple-battery";
 		voltage-max-design-microvolt = <4350000>;
@@ -196,6 +214,35 @@
 		drive-strength = <2>;
 		bias-disable;
 	};
+
+	/*
+	 * Rear telephoto camera: MCLK3 on gpio97, XSHUTDOWN on gpio78, module
+	 * LDO enable on gpio135. Drive strengths are the stock ones
+	 * (fragment@123 raises the MCLK pin to 4 mA; everything else stays at
+	 * the 2 mA the base DT uses).
+	 */
+	cam_tele_default: cam-tele-default-state {
+		mclk-pins {
+			pins = "gpio97";
+			function = "cam_mclk";
+			drive-strength = <4>;
+			bias-disable;
+		};
+
+		rst-pins {
+			pins = "gpio78";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		ldo-pins {
+			pins = "gpio135";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
 };
 
 &pm8150l_gpios {
@@ -291,6 +338,318 @@
 			vreg_pmu_pcie_1p8: ldo9 {
 				regulator-name = "vreg_pmu_pcie_1p8";
 			};
+		};
+	};
+};
+
+/*
+ * r8q CAMERA (session 5m).
+ *
+ * The stock dtbo describes four modules, all with their own MCLK, XSHUTDOWN and
+ * discrete module LDO, and all sharing cam_vio on pm8150L L7:
+ *
+ *   fragment@181 &cam_cci0  cam-sensor0 rear wide   CSIPHY0  cci0 m0  MCLK0 gpio94
+ *                           cam-sensor1 front       CSIPHY3  cci0 m1  MCLK2 gpio96 (24 MHz)
+ *   fragment@183 &i2c2      cam-sensor2 rear uw     CSIPHY1  0x2d     MCLK1 gpio95
+ *   fragment@184 &i2c10     cam-sensor3 rear tele   CSIPHY2  0x21     MCLK3 gpio97
+ *
+ * The two rear auxiliaries hang off ordinary QUP I2C rather than CCI, which is
+ * why they carry a slave-addr in the DT while the CCI pair does not (Qualcomm's
+ * downstream camera stack gets those addresses from userspace).
+ *
+ * Only the telephoto is wired up here: it is the one module whose sensor has an
+ * in-tree driver. It is an SK hynix Hi-847 (8 MP, 4-lane D-PHY, SGRBG10), and
+ * the giveaway is that the stock node clocks MCLK3 at exactly 19.2 MHz, which is
+ * the only rate drivers/media/i2c/hi847.c accepts. That driver was written for
+ * an ACPI/IPU6 laptop, so patches/0008 teaches it device tree: an of_match
+ * entry, the reset GPIO, the supplies and the MCLK.
+ *
+ * The other three (Sony IMX555 wide, Samsung S5K2LA ultra-wide, front) have no
+ * mainline driver yet.
+ */
+&camss {
+	status = "okay";
+
+	vdda-phy-supply = <&vreg_l5a_0p88>;
+	vdda-pll-supply = <&vreg_l9a_1p2>;
+
+	ports {
+		port@2 {
+			csiphy2_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&hi847_ep>;
+			};
+		};
+	};
+};
+
+/*
+ * Autofocus actuators. Both live on cci1 master 1: the rear wide's at 0x0c and
+ * the rear telephoto's at 0x0f (stock slave-addr 0x18 and 0x1e, shifted down).
+ *
+ * Both are AK7375 register-compatible, established by write/readback on the
+ * live bus rather than by guessing: register 0x02 reads back 0x40, which is
+ * AK7375's STANDBY bit, goes to 0x00 when ACTIVE is written, and a position
+ * written to 0x00/0x01 as pos<<4 reads back exactly. Neither the DW9714 nor the
+ * DW9807 protocol gets any response.
+ *
+ * Only the telephoto's is wired up, since that is the only lens with a working
+ * sensor driver so far.
+ */
+&cci1_i2c1 {
+	cam_af_tele: focus@f {
+		compatible = "asahi-kasei,ak7375";
+		reg = <0x0f>;
+
+		vdd-supply = <&vreg_l10a_2p8>;	/* stock cam_vaf */
+		vio-supply = <&vreg_l7c_1p8>;	/* stock cam_vio */
+	};
+};
+
+/* SE10 (qupv3_se10_i2c) is the rear telephoto's control bus. */
+&gpi_dma1 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&i2c10 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	camera@21 {
+		compatible = "hynix,hi847";
+		reg = <0x21>;
+
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 78 GPIO_ACTIVE_LOW>;
+
+		/*
+		 * The MCLK branch lives inside camcc's TITAN_TOP domain. With
+		 * that domain off, enabling cam_cc_mclk3_clk gets
+		 * "status stuck at 'off'" and -EBUSY, so the sensor has to be a
+		 * genpd consumer in its own right rather than relying on CAMSS
+		 * happening to have powered the domain up first.
+		 */
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		/*
+		 * avdd and dvdd are the same enable line -- the module carries
+		 * its own LDO and the stock node only ever switches it on.
+		 */
+		vddio-supply = <&vreg_l7c_1p8>;
+		avdd-supply = <&vreg_cam_tele>;
+		dvdd-supply = <&vreg_cam_tele>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_tele_default>;
+
+		lens-focus = <&cam_af_tele>;
+
+		orientation = <1>;	/* Back facing */
+		/*
+		 * The stock DT's sensor-position-roll is 0x5a, but Samsung's
+		 * convention is not V4L2's: 90 put the preview 180 degrees out
+		 * (user-verified on the panel). V4L2 wants the sensor's
+		 * clockwise rotation relative to the device's natural
+		 * orientation, which is 270 here.
+		 */
+		rotation = <270>;
+
+		port {
+			hi847_ep: endpoint {
+				/*
+				 * No clock-lanes here: v4l2_fwnode would see
+				 * lane 1 in both lists and fall back to
+				 * defaults ("duplicated lane 1 in
+				 * clock-lanes").
+				 */
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <400000000 200000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+};
+
+/*
+ * Sensor identification nodes (session 5m).
+ *
+ * Nothing in Samsung's DT names the parts, and the two CCI modules do not even
+ * carry an I2C address there -- Qualcomm's stack takes both from userspace. A
+ * sensor will not ACK until its rails are on, MCLK is running and XSHUTDOWN is
+ * released, so identifying one needs a driver. tools/camprobe is that driver:
+ * these nodes give it a module's power resources and a list of addresses to
+ * try, and it prints what answers at each.
+ *
+ * It is built out-of-tree and never autoloads, so these nodes sit unbound and
+ * completely inert until r8q-camprobe.ko is insmodded by hand. Loading it
+ * powers a camera module up for a few hundred milliseconds and puts it back
+ * down.
+ *
+ * The rear WIDE module is deliberately missing: its LDO enable is TLMM 32,
+ * which the wcd938x node currently claims as the codec reset. That pin
+ * assignment came from sm8250-mtp.dts and is almost certainly wrong for r8q --
+ * the stock dtbo's own cam-sensor0 labels gpio32 "RCAM1_LDO_EN", while the
+ * downstream codec's msm_cdc_pinctrl node has empty pinctrl lists, i.e. it
+ * drives no TLMM pin at all. Worth revisiting when audio is picked up again;
+ * until then the two must not both claim the pin.
+ */
+&cci0 {
+	status = "okay";
+};
+
+/*
+ * cci1 carries the autofocus actuators and the calibration EEPROMs
+ * (stock fragment@182). The rear telephoto's VCM is qcom,actuator2 at
+ * slave-addr 0x1e on cci-master 1 -- 0x0f once shifted down, if that field is
+ * 8-bit here as it is for the OIS (reg 0x51 / slave-addr 0xa2). The rear wide's
+ * is 0x18, i.e. 0x0c, which is the canonical VCM address, so the shift is
+ * probably right; the prober below settles it rather than guessing.
+ */
+&cci1 {
+	status = "okay";
+};
+
+&i2c2 {
+	clock-frequency = <400000>;
+	status = "okay";
+};
+
+/ {
+	/* Rear ultra-wide module LDO, downstream "RCAM2_LDO_EN". */
+	vreg_cam_uw: regulator-cam-uw {
+		compatible = "regulator-fixed";
+		regulator-name = "rcam2_ldo_en";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 33 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	/* Front module LDO, downstream "FCAM_LDO_EN". */
+	vreg_cam_front: regulator-cam-front {
+		compatible = "regulator-fixed";
+		regulator-name = "fcam_ldo_en";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 172 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	cam_probe_uw: cam-probe-uw {
+		compatible = "r8q,cam-probe";
+		i2c-bus = <&i2c2>;
+		/* 0x2d is what the stock slave-addr 0x5a shifts down to. */
+		r8q,addresses = <0x2d 0x10 0x1a 0x20 0x21 0x34 0x36>;
+
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 125 GPIO_ACTIVE_LOW>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		vddio-supply = <&vreg_l7c_1p8>;
+		avdd-supply = <&vreg_cam_uw>;
+		dvdd-supply = <&vreg_cam_uw>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_uw_default>;
+	};
+
+	/*
+	 * Autofocus actuator prober. No MCLK -- a VCM has none -- and no
+	 * 16-bit register map either, so this leans on camprobe's bare-read
+	 * fallback to answer "is anything at this address".
+	 */
+	cam_probe_af: cam-probe-af {
+		/* Superseded by the ak7375 node above; keep for re-probing. */
+		status = "disabled";
+		compatible = "r8q,cam-probe";
+		i2c-bus = <&cci1_i2c1>;
+		r8q,addresses = <0x0c 0x0f 0x0e 0x18 0x1e 0x3d 0x76>;
+
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		vddio-supply = <&vreg_l7c_1p8>;	/* stock cam_vio  */
+		avdd-supply = <&vreg_l10a_2p8>;	/* stock cam_vaf  */
+		dvdd-supply = <&vreg_l7c_1p8>;
+	};
+
+	cam_probe_front: cam-probe-front {
+		compatible = "r8q,cam-probe";
+		i2c-bus = <&cci0_i2c1>;
+		r8q,addresses = <0x10 0x1a 0x2d 0x20 0x21 0x34 0x36>;
+
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		vddio-supply = <&vreg_l7c_1p8>;
+		avdd-supply = <&vreg_cam_front>;
+		dvdd-supply = <&vreg_l3c_1p056>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_front_default>;
+	};
+};
+
+&tlmm {
+	cam_uw_default: cam-uw-default-state {
+		mclk-pins {
+			pins = "gpio95";
+			function = "cam_mclk";
+			drive-strength = <4>;
+			bias-disable;
+		};
+
+		rst-pins {
+			pins = "gpio125";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		ldo-pins {
+			pins = "gpio33";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	cam_front_default: cam-front-default-state {
+		mclk-pins {
+			pins = "gpio96";
+			function = "cam_mclk";
+			drive-strength = <4>;
+			bias-disable;
+		};
+
+		rst-pins {
+			pins = "gpio30";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		ldo-pins {
+			pins = "gpio172";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
 		};
 	};
 };

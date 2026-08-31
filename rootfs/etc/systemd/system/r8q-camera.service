@@ -1,0 +1,34 @@
+[Unit]
+Description=r8q camera: camcc + CAMSS + rear telephoto (Hi-847) module load
+# The sensor sits on qupv3_se10_i2c, so the geni I2C driver has to be up first
+# -- and on this device that only happens deliberately, from r8q-touch.service
+# (i2c-qcom-geni needs r8q_force_fifo=1; see patches/0003). Without an i2c10
+# adapter the camera@21 device is never created, the subdev never registers,
+# and CAMSS sits waiting for an async notifier that will never complete -- with
+# nothing in the log to say why.
+After=r8q-touch.service
+Requires=r8q-touch.service
+ConditionPathExists=!/dev/media0
+
+[Service]
+Type=oneshot
+# camcc first and by hand: it is the clock provider for both CAMSS and the
+# sensor's MCLK, and it is blacklisted from udev coldplug (r8q-camera-blacklist)
+# so that a camera fault can never turn into a boot loop -- recovering this
+# device from one costs a physical VolUp+Power.
+ExecStart=/usr/bin/modprobe camcc-sm8250
+# CCI carries the autofocus actuators (and, later, the wide/front sensors).
+ExecStart=/usr/bin/modprobe i2c-qcom-cci
+# The lens must be up before the sensor: hi847's DT node has lens-focus, so
+# v4l2_async_register_subdev_sensor() pulls the actuator into the sensor's own
+# async notifier and will wait for it.
+ExecStart=/usr/bin/modprobe ak7375
+ExecStart=/usr/bin/modprobe qcom-camss
+ExecStart=/usr/bin/modprobe hi847
+# The media device only appears once the sensor subdev has bound and CAMSS's
+# async notifier is complete, so this is the honest "camera is up" test.
+ExecStart=/bin/sh -c 'for i in $(seq 100); do [ -e /dev/media0 ] && exit 0; sleep 0.1; done; echo "CAMSS registered no media device" >&2; exit 1'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

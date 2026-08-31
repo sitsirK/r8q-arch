@@ -1,0 +1,117 @@
+#!/bin/bash
+# r8q-cam -- manual camera control for the Samsung Galaxy S20 FE (r8q).
+#
+# libcamera's software ISP has no manual-exposure controls: it advertises only
+# Saturation, Contrast and Gamma. So manual shutter/ISO is done one level down,
+# on the sensor's own V4L2 controls, and the AGC is stopped from overwriting
+# them by selecting a tuning file that leaves the Agc algorithm out
+# (hi847-manual.yaml). "auto" switches back to the tuning file that has it.
+#
+# Run capture/preview as a normal user, NOT root: the udev rule that steers
+# libcamera away from the 32 MiB CMA heap works by permissions, and root
+# ignores those -- as root you get "dma-heap allocation failure" once the CMA
+# area fragments.
+set -u
+
+MEDIA=/dev/media0
+ENTITY="hi847 10-0021"
+CAMID="/base/soc@0/geniqup@ac0000/i2c@a88000/camera@21"
+TUNE_DIR=/usr/share/libcamera/ipa/simple
+MODEFILE=/run/r8q-cam.mode
+
+# One sensor line is ~11.5 us in both modes: 30 fps at a 2897-line frame length,
+# 60 fps at 1449. Derived from the frame rate, not from the (misleading) llp.
+LINE_US=11.5
+
+sd() { media-ctl -d "$MEDIA" -e "$ENTITY" 2>/dev/null; }
+
+need_camera() {
+    [ -e "$MEDIA" ] || { echo "no $MEDIA -- is r8q-camera.service running?" >&2; exit 1; }
+    [ -n "$(sd)" ] || { echo "sensor subdev not found in the media graph" >&2; exit 1; }
+}
+
+tuning_file() {
+    [ "$(cat $MODEFILE 2>/dev/null || echo manual)" = auto ] \
+        && echo "$TUNE_DIR/hi847.yaml" || echo "$TUNE_DIR/hi847-manual.yaml"
+}
+
+usage() {
+    cat <<EOF
+Usage: r8q-cam <command> [args]
+
+  show                  print the current sensor settings
+  auto                  hand exposure back to libcamera's AGC
+  manual                hold the current shutter/gain (AGC off)
+  shutter <us>          exposure time in microseconds (raises vblank if needed)
+  gain <0-240>          analogue gain, raw sensor code (0 = minimum)
+  dgain <1-8191>        digital gain, 512 = unity
+  focus <0-4095>        lens position; 0 = infinity end of travel
+  focus                 print the current lens position
+  reset                 back to sensor defaults, AGC on
+  still <file.bin>      grab one frame (RGB) with the current settings
+  preview               run the camera app in the current mode
+
+Shutter range depends on the frame length; 'show' prints the current maximum.
+EOF
+}
+
+need_camera
+SD="$(sd)"
+CMD="${1:-show}"; shift || true
+
+case "$CMD" in
+show)
+    echo "mode:     $(cat $MODEFILE 2>/dev/null || echo manual)  ($(basename "$(tuning_file)"))"
+    v4l2-ctl -d "$SD" -L | grep -E "exposure|analogue_gain|digital_gain|vertical_blanking" \
+        | sed 's/^ */  /'
+    ex=$(v4l2-ctl -d "$SD" -C exposure | awk '{print $2}')
+    echo "  shutter ~ $(awk -v e="$ex" -v l="$LINE_US" 'BEGIN{printf "%.1f", e*l/1000}') ms"
+    ;;
+auto)   echo auto > $MODEFILE; echo "AGC on -- libcamera controls exposure and gain";;
+manual) echo manual > $MODEFILE; echo "AGC off -- shutter and gain held at their current values";;
+shutter)
+    us="${1:?microseconds}"
+    lines=$(awk -v u="$us" -v l="$LINE_US" 'BEGIN{printf "%d", (u/l)+0.5}')
+    [ "$lines" -lt 4 ] && lines=4
+    max=$(v4l2-ctl -d "$SD" -L | awk '/exposure /{for(i=1;i<=NF;i++) if($i ~ /^max=/){sub("max=","",$i); print $i}}')
+    if [ "$lines" -gt "$max" ]; then
+        # Exposure cannot exceed the frame length, so stretch the frame with
+        # vertical blanking first -- this is what lowers the frame rate.
+        h=$(v4l2-ctl -d "$SD" --get-subdev-fmt 0 2>/dev/null | awk -F'x' '/Width\/Height/{print $2+0}')
+        [ -n "$h" ] || h=1224
+        v4l2-ctl -d "$SD" --set-ctrl=vertical_blanking=$((lines - h + 8)) >/dev/null 2>&1
+        max=$(v4l2-ctl -d "$SD" -L | awk '/exposure /{for(i=1;i<=NF;i++) if($i ~ /^max=/){sub("max=","",$i); print $i}}')
+        [ "$lines" -gt "$max" ] && lines=$max
+    fi
+    v4l2-ctl -d "$SD" --set-ctrl=exposure=$lines
+    echo "shutter = $lines lines (~$(awk -v e="$lines" -v l="$LINE_US" 'BEGIN{printf "%.1f", e*l/1000}') ms)"
+    echo manual > $MODEFILE
+    ;;
+gain)   v4l2-ctl -d "$SD" --set-ctrl=analogue_gain="${1:?0-240}"; echo manual > $MODEFILE;;
+focus)
+    # The actuator is its own subdev, linked to the sensor by the DT lens-focus
+    # phandle. There is no autofocus anywhere in this stack -- libcamera's soft
+    # ISP has no AF algorithm -- so this is the only way to focus the lens.
+    LD=$(media-ctl -d "$MEDIA" -e "ak7375 23-000f" 2>/dev/null)
+    [ -n "$LD" ] || { echo "no focus actuator (is ak7375 loaded?)" >&2; exit 1; }
+    if [ $# -eq 0 ]; then v4l2-ctl -d "$LD" -C focus_absolute; else
+        v4l2-ctl -d "$LD" --set-ctrl=focus_absolute="$1"
+        v4l2-ctl -d "$LD" -C focus_absolute
+    fi
+    ;;
+dgain)  v4l2-ctl -d "$SD" --set-ctrl=digital_gain="${1:?1-8191}"; echo manual > $MODEFILE;;
+reset)
+    v4l2-ctl -d "$SD" --set-ctrl=vertical_blanking=449 >/dev/null 2>&1
+    v4l2-ctl -d "$SD" --set-ctrl=analogue_gain=0,digital_gain=512 >/dev/null 2>&1
+    echo auto > $MODEFILE; echo "defaults restored, AGC on"
+    ;;
+still)
+    out="${1:?output file}"
+    LIBCAMERA_SIMPLE_TUNING_FILE="$(tuning_file)" LIBCAMERA_LOG_LEVELS='*:ERROR' \
+        cam -c "$CAMID" --capture=2 --file="$out" 2>&1 | grep -viE 'rectangle' | tail -3
+    ;;
+preview)
+    LIBCAMERA_SIMPLE_TUNING_FILE="$(tuning_file)" exec plasma-camera "$@"
+    ;;
+*) usage; exit 1;;
+esac

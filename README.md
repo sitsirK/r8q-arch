@@ -42,6 +42,7 @@ into.
 | 12 | **Wi-Fi** — QCA6390 over PCIe via `ath11k_pci` + MHI; `wlp1s0` scans and associates | ✅ |
 | 13 | **KDE Plasma Mobile** — `sddm` autologin → mobile shell on the Adreno, ~12 s cold boot (GNOME still installed as a fallback) | ✅ |
 | 14 | **CPU wedge root-caused** — the "phone dies under load" bug is `cpu7` never returning from `cpu-sleep-1-0` power collapse; that idle state is now disabled on cpus 4-7 | ✅ fix holding (first 50 min session clean; longer soak still welcome) |
+| 15 | **Camera (partial)** — rear telephoto (SK hynix Hi-847) through CAMSS and libcamera's software ISP on the Adreno; live in `plasma-camera` and GNOME Snapshot | ⚠️ one lens only, no autofocus, no manual exposure in-app |
 
 See the [**Roadmap**](#roadmap) below for what's next (Bluetooth, USB host mode,
 audio, a greeter/lock screen).

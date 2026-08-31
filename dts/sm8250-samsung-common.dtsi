@@ -86,6 +86,9 @@
 			no-map;
 		};
 	};
+};
+
+/ {
 
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
@@ -167,6 +170,19 @@
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
+		/*
+		 * Camera autofocus actuator supply (stock cam_vaf on every
+		 * qcom,actuator node). 2.8 V is selector 162 of this PLDO's
+		 * 1.504 V + 8 mV range, so unlike the 1.05 V front-camera rail
+		 * it lands exactly on the grid.
+		 */
+		vreg_l10a_2p8: ldo10 {
+			regulator-name = "vreg_l10a_2p8";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
 		vreg_l12a_1p8: ldo12 {
 			regulator-name = "vreg_l12a_1p8";
 			regulator-min-microvolt = <1800000>;
@@ -200,6 +216,38 @@
 			regulator-name = "vreg_s8c_1p35";
 			regulator-min-microvolt = <1350000>;
 			regulator-max-microvolt = <1400000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/*
+		 * Camera I/O rail, 1.8 V. Every camera in the stock dtbo takes
+		 * its cam_vio from this LDO (downstream calls the PMIC
+		 * "pm8150a", which is this chip -- pm8150L, RPMh id "c": its
+		 * rail list has the BOB and the AMOLED regulators, and its l2/l3
+		 * are NLDOs, which is what the 1.1 V / 1.05 V camera digital
+		 * supplies need).
+		 */
+		vreg_l7c_1p8: ldo7 {
+			regulator-name = "vreg_l7c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/*
+		 * Front camera digital core. The stock DT asks for 1.050 V, but
+		 * this is an RPMh NLDO whose selectors are 8 mV apart from
+		 * 320 mV, so 1,050,000 is not on the grid -- and because
+		 * min == max the regulator core has to apply exactly that
+		 * voltage at registration, fails, and takes the WHOLE
+		 * regulators-1 node down with it (which costs S8C, and with it
+		 * WiFi). 1.056 V is the next selector up; mainline sm8550-qrd
+		 * names the same rail vreg_l2m_1p056 for the same reason.
+		 */
+		vreg_l3c_1p056: ldo3 {
+			regulator-name = "vreg_l3c_1p056";
+			regulator-min-microvolt = <1056000>;
+			regulator-max-microvolt = <1056000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 	};

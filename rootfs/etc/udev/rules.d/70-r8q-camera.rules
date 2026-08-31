@@ -1,0 +1,13 @@
+# r8q: let the desktop session reach the camera.
+#
+# dma-buf heaps are root-only by default. libcamera's software ISP needs one to
+# allocate its output buffers, so the session user has to be able to open one.
+#
+# Which one matters: libcamera tries the CMA heap first and only falls through
+# to the system heap if it cannot open it. On this device the CMA area is 32 MiB
+# total, which is less than a single 8 MP ABGR8888 frame (~31 MiB) -- allocation
+# fails with "cma: alloc failed, req-size: 7803 pages". The system heap has no
+# such limit. So: system heap readable by the video group, CMA heaps left
+# root-only so libcamera skips them.
+SUBSYSTEM=="dma_heap", KERNEL=="system", GROUP="video", MODE="0660"
+SUBSYSTEM=="dma_heap", KERNEL!="system", OWNER="root", GROUP="root", MODE="0600"

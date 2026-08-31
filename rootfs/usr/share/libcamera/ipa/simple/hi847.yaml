@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# libcamera soft-ISP tuning for the SK hynix Hi-847 as fitted to the Samsung
+# Galaxy S20 FE 5G (r8q) rear telephoto.
+#
+# The stock uncalibrated.yaml leaves the colour correction matrix out, because
+# an untuned CCM costs performance for no benefit. That is why the preview looks
+# washed out: the raw sensor primaries overlap far more than sRGB's, so without
+# a matrix to pull them apart everything trends grey. This is a generic
+# daylight CCM, not a measured one -- each row sums to 1.0 so it changes
+# saturation without shifting the white point.
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+  - Awb:
+  - Ccm:
+      ccms:
+        - ct: 6500
+          ccm: [  1.60, -0.50, -0.10,
+                 -0.25,  1.55, -0.30,
+                  0.05, -0.60,  1.55 ]
+  - Adjust:
+  - Agc:
+...

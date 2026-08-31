@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# Manual-exposure variant of the r8q Hi-847 tuning.
+#
+# Identical to hi847.yaml except that the Agc algorithm is left out. The soft
+# IPA has no manual-exposure controls -- it exposes only Saturation, Contrast
+# and Gamma -- so the only way to hold a chosen shutter and ISO is to stop the
+# AGC from writing to the sensor at all. With Agc absent, whatever is in the
+# sensor's V4L2 exposure / analogue_gain / digital_gain controls stays put, and
+# r8q-cam(1) sets those directly.
+#
+# Select with:  LIBCAMERA_SIMPLE_TUNING_FILE=/usr/share/libcamera/ipa/simple/hi847-manual.yaml
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+  - Awb:
+  - Ccm:
+      ccms:
+        - ct: 6500
+          ccm: [  1.60, -0.50, -0.10,
+                 -0.25,  1.55, -0.30,
+                  0.05, -0.60,  1.55 ]
+  - Adjust:
+...
