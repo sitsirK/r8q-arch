@@ -67,6 +67,18 @@ r8q-arch/
 └── scripts/                      ← build-uefi / flash / deploy-esp / install-arch / host-tether / build_kernel
 ```
 
+## Roadmap
+
+The device boots to an accelerated KDE Plasma Mobile session you can touch and
+SSH into. What's left, roughly in the order it's worth doing:
+
+| Goal | What it needs | Notes |
+|------|---------------|-------|
+| **Bluetooth** | QCA6390 BT (`hci_qca` over UART/serdev) | Same chip as Wi-Fi, and the `qca6390-pmu` in the DT already drives its BT_EN line — so the power sequencing is done and this is the cheapest remaining win. |
+| **USB host mode** | dwc3 role switch + VBUS (`pm8150b` regulator or powered OTG hub) | Currently peripheral-only (that's how SSH works). Host mode gets a real keyboard/mouse. Needs a role-switch path and VBUS supply. |
+| **Greeter / lock screen** | Replace sddm autologin with a real login | Plasma Mobile already ships `plasma-keyboard` as an on-screen keyboard, so a headless login is now viable. Pure userspace/config work; no kernel changes. |
+| **Audio** | LPASS + WCD938x codec + `cs35l41` speaker amps (SoundWire) | The hardest mainline bring-up here; lowest priority for a dev device. |
+
 ## The short version of how it boots
 
 Download mode → `heimdall` flashes **Mu-Silicium UEFI** (with our DTB embedded)
@@ -114,23 +126,7 @@ session silently runs on the CPU.
   drop-in and gdm autologin. Switch back with
   `systemctl disable sddm && systemctl enable gdm`.
 - A tty1 autologin profile that starts **sway** on the GPU is kept as a second fallback.
-
-### The CPU wedge (`tmpfiles.d/50-r8q-cpuidle.conf`)
-
-Until this was found, the phone would stop dead under sustained rendering. It is
-not a display or GPU fault: **cpu7 enters the `cpu-sleep-1-0` power-collapse state
-and never comes back out**, so every later `kick_all_cpus_sync()` — the BPF JIT's
-text poking hits this constantly via systemd's cgroup BPF — blocks forever waiting
-for a core that will not answer even an NMI. RCU says so directly, reporting cpu7
-with an *even* dynticks counter (`idle=…/0x4000000000000000`), meaning it believes
-that core is idle.
-
-The tell is distinctive: **the kernel keeps answering ICMP while userspace stops
-entirely** — ping stays at ~2 ms but `sshd` cannot emit its version banner. The
-workaround disables idle `state1` on cpus 4-7 only; cpus 0-3 use a different state
-and keep their power collapse. Same family as the s2idle hard reset — this SoC's
-low-power paths are not trustworthy under mainline.
-
+  
 ### Touchscreen
 
 The STM **FTS5CU56A** touch controller sits on `i2c5` (`qupv3_se5`), powered by
@@ -270,15 +266,3 @@ Two things worth knowing about the log noise Wi-Fi produces:
   lever as the original `loglevel=3` change.
 
 ---
-
-## Roadmap
-
-The device boots to an accelerated KDE Plasma Mobile session you can touch and
-SSH into. What's left, roughly in the order it's worth doing:
-
-| Goal | What it needs | Notes |
-|------|---------------|-------|
-| **Bluetooth** | QCA6390 BT (`hci_qca` over UART/serdev) | Same chip as Wi-Fi, and the `qca6390-pmu` in the DT already drives its BT_EN line — so the power sequencing is done and this is the cheapest remaining win. |
-| **USB host mode** | dwc3 role switch + VBUS (`pm8150b` regulator or powered OTG hub) | Currently peripheral-only (that's how SSH works). Host mode gets a real keyboard/mouse. Needs a role-switch path and VBUS supply. |
-| **Greeter / lock screen** | Replace sddm autologin with a real login | Plasma Mobile already ships `plasma-keyboard` as an on-screen keyboard, so a headless login is now viable. Pure userspace/config work; no kernel changes. |
-| **Audio** | LPASS + WCD938x codec + `cs35l41` speaker amps (SoundWire) | The hardest mainline bring-up here; lowest priority for a dev device. |
