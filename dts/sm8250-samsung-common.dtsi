@@ -108,6 +108,55 @@
 	};
 };
 
+/*
+ * r8q: Samsung's signed ADSP image does not fit mainline's carveout.
+ *
+ * sm8250.dtsi sizes adsp_mem at 0x1d00000 (29.00 MiB), which is EXACTLY the span of the
+ * generic linux-firmware sm8250 adsp.mbn. Samsung's own signed image carries a lot more
+ * codecs (ALAC/APE/FLAC/LDAC/WMA/AudioSphere -- see the stock `dsp` partition) and spans
+ * 44.00 MiB of PT_LOAD segments (0x89500000-0x8c100000, all relocatable, bit 27 set):
+ *
+ *   linux-firmware generic  19 segs  0x89500000-0x8b200000 = 29.00 MiB
+ *   Samsung r8q             20 segs  0x89500000-0x8c100000 = 44.00 MiB
+ *
+ * With only 29 MiB, qcom_mdt_load bails out per-segment with "segment outside memory range"
+ * (offset + p_memsz > mem_size) and the ADSP never boots -- which means no q6afe/q6asm/
+ * q6routing, i.e. no audio at all.
+ *
+ * We give the ADSP the SLPI slot as well, since we do not use the sensor DSP.
+ *
+ * IMPORTANT -- the region may NOT start at 0x88c00000, even though that is where slpi_mem
+ * begins and it looks like the obvious place. Something in the pre-Linux environment (almost
+ * certainly Mu-Silicium's EFI memory map) claims physical memory up to 0x891fffff, and that
+ * claim does NOT track our device tree:
+ *
+ *   /proc/iomem:  86e00000-891fffff : reserved
+ *
+ * Anything requesting a region that starts inside it gets
+ * "-EBUSY: can't request region for resource" out of devm_ioremap_wc and the driver never
+ * even reaches the firmware. That is why upstream's slpi_mem at 0x88c00000 always failed
+ * this way, while adsp_mem at 0x8a100000 got all the way to the firmware size check -- it
+ * sits above the claim. So the region must start at or above 0x89200000.
+ *
+ * 0x89200000..0x8be00000 is exactly 0x2c00000 = 44.00 MiB, which is exactly the span the
+ * Samsung image needs. mdt_loader's per-segment test is
+ * "offset + p_memsz > mem_size", so an exact fit passes. spss_mem and cdsp_secure_heap are
+ * deliberately left where upstream puts them rather than shuffled for headroom -- they are
+ * TZ-facing regions and not worth disturbing for one spare megabyte.
+ *
+ *   cdsp_mem  0x87800000 + 0x1400000 -> 0x88c00000   (unchanged)
+ *   slpi_mem  0x88c00000 +  0x600000 -> 0x89200000   (parked in the claimed zone, &slpi off)
+ *   adsp_mem  0x89200000 + 0x2c00000 -> 0x8be00000   (was 0x8a100000 + 0x1d00000)
+ *   spss_mem  0x8be00000 +  0x100000 -> 0x8bf00000   (unchanged)
+ */
+&adsp_mem {
+	reg = <0x0 0x89200000 0x0 0x2c00000>;
+};
+
+&slpi_mem {
+	reg = <0x0 0x88c00000 0x0 0x600000>;
+};
+
 / {
 
 	vph_pwr: vph-pwr-regulator {

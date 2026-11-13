@@ -15,14 +15,26 @@
 	status = "okay";
 };
 
+/*
+ * r8q: the compute DSP and the sensor DSP are deliberately left OFF for now.
+ *
+ * slpi_mem has been reduced to a 6 MiB parking slot so the ADSP can have the 44 MiB its
+ * Samsung-signed image actually needs (see sm8250-samsung-common.dtsi), so SLPI could not
+ * load even if we wanted it -- and its probe was already failing with
+ * "-EBUSY: can't request region for resource [mem 0x88c00000-0x8a0fffff]".
+ *
+ * CDSP fits its carveout exactly but TrustZone rejected its image with
+ * "error -22 setting up firmware" (qcom_scm_pas_init_image). Neither DSP is needed for
+ * audio -- that is entirely the ADSP -- so both stay off to keep one variable at a time.
+ */
 &cdsp {
 	firmware-name = "qcom/sm8250/Samsung/r8q/cdsp.mbn";
-	status = "okay";
+	status = "disabled";
 };
 
 &slpi {
 	firmware-name = "qcom/sm8250/Samsung/r8q/slpi.mbn";
-	status = "okay";
+	status = "disabled";
 };
 
 &gmu {
