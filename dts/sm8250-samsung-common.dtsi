@@ -81,8 +81,28 @@
 			reg = <0x0 0x9fa00000 0x0 0x100000>;
 			record-size = <0x4000>;
 			console-size = <0x40000>;
-			ftrace-size = <0x40000>;
-			pmsg-size = <0x40000>;
+			ftrace-size = <0x80000>;
+			pmsg-size = <0x20000>;
+			/*
+			 * BIT(0) = RAMOOPS_FLAG_FTRACE_PER_CPU, and it is not optional
+			 * here. Only ramoops' platform-data path sets it by default; the
+			 * DT path reads it from this property, so without it
+			 * ramoops_pstore_write() sends EVERY cpu's function trace into
+			 * fprzs[0] behind one raw_spinlock. The lock path is itself
+			 * traced, so turning on /sys/kernel/debug/pstore/record_ftrace
+			 * livelocks the machine: on 2026-09-07 it hung the phone hard
+			 * within seconds, and the recovered ring was nothing but
+			 * "_raw_spin_lock_irqsave <- persistent_ram_write".
+			 * With the flag set each cpu gets its own zone and
+			 * PRZ_FLAG_NO_LOCK, i.e. a lockless per-cpu ring.
+			 *
+			 * ftrace 512K/8 = 64K per cpu = ~2700 records, which is the
+			 * only channel that shows what the WEDGED core itself was doing
+			 * (it answers no IPI and no NMI, so nothing can interrogate it
+			 * after the fact). pmsg drops to 128K to pay for it -- still
+			 * ~30 min of 10 ms watchdog heartbeats.
+			 */
+			flags = <1>;
 			no-map;
 		};
 	};
