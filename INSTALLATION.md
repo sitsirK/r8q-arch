@@ -35,8 +35,10 @@ Outputs: `$OUT/arch/arm64/boot/Image` and
 
 ## 2. Embed the DTB and build UEFI
 
-The DTB lives **inside the firmware** (Mu-Silicium exposes it to the kernel via
-`DtPlatformDxe`). Enable the "Device Tree" FREEFORM block in
+Mu-Silicium carries a copy of the DTB **inside the firmware** and exposes it via
+`DtPlatformDxe`. (The kernel does not boot from this copy — it loads `r8q.dtb`
+from the ESP, see step 5 — so later device-tree changes do not need a re-flash.)
+Enable the "Device Tree" FREEFORM block in
 `$MUSIL/Platforms/Samsung/r8qPkg/r8q.fdf`, then:
 
 ```bash
@@ -64,13 +66,36 @@ ESP=$(lsblk -o NAME,PARTLABEL -rn | awk '$2=="cache"{print "/dev/"$1}')
 sudo mkfs.vfat -F 32 -S 4096 -n R8QESP "$ESP"
 ```
 
-## 5. Deploy the kernel Image to the ESP
+## 5. Deploy the kernel Image and the DTB to the ESP
 
 Still in mass-storage mode:
 
 ```bash
-./scripts/deploy-esp.sh $OUT/arch/arm64/boot/Image   # -> ESP:/EFI/BOOT/BOOTAA64.EFI
+./scripts/deploy-esp.sh $OUT/arch/arm64/boot/Image \
+                        $OUT/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb
+#   -> ESP:/EFI/BOOT/BOOTAA64.EFI   and   ESP:/r8q.dtb
 ```
+
+**Both files are required.** The forced command line contains `dtb=r8q.dtb`, so
+the kernel's EFI stub loads the device tree from the root of the ESP. If the file
+is not there it does **not** fall back to the firmware's copy: it stops with
+`Failed to load device tree!`, which Mu-Silicium reports as *Failed to find an
+operating system*.
+
+This is also what makes later changes cheap. The running phone can mount its own
+ESP, so a new device tree (or a new `Image`, copied over
+`EFI/BOOT/BOOTAA64.EFI` the same way) is one copy and a reboot — no mass-storage
+mode, no re-flash:
+
+```bash
+scp $OUT/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb root@172.16.42.1:/root/r8q.dtb
+ssh root@172.16.42.1 'mkdir -p /mnt/esp && mount /dev/disk/by-partlabel/cache /mnt/esp &&
+    cp /mnt/esp/r8q.dtb /mnt/esp/r8q.dtb.bak && cp /root/r8q.dtb /mnt/esp/r8q.dtb &&
+    sync && umount /mnt/esp'
+```
+
+Keep the `.bak`: a device tree that does not boot can only be put back from
+mass-storage mode.
 
 ## 6. Install Arch onto userdata
 

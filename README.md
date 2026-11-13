@@ -87,9 +87,12 @@ with an embedded **switch-root initramfs**) → the initramfs mounts `userdata` 
 `switch_root`s into **Arch Linux ARM / systemd** → NCM USB gadget comes up →
 `ssh root@172.16.42.1`.
 
-The DTB lives **inside the firmware** (Mu-Silicium exposes it as an EFI config
-table via `DtPlatformDxe`), so DTB changes need a re-flash; the kernel `Image`
-lives on the **ESP** and is swapped over mass-storage mode.
+The kernel `Image` and the device tree both live on the **ESP**. The forced
+command line carries `dtb=r8q.dtb`, so the EFI stub loads `\r8q.dtb` from the ESP
+root instead of the copy embedded in the firmware — and it **refuses to boot if
+that file is missing**; there is no fallback. Both files are swapped over
+mass-storage mode, or straight from the running phone, which can mount its own
+ESP. Neither a kernel nor a device-tree change needs a re-flash.
 
 ## How the GPU works (short version)
 

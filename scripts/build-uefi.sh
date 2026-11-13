@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # Embed our kernel-built DTB into Mu-Silicium and build the UEFI boot image.
-# The DTB (with the display fix: dispcc protected-clocks + framebuffer MDSS_GDSC
-# power-domain) lives INSIDE the firmware, so any DTB change needs a re-flash.
+# The firmware carries a copy of the DTB (with the display fix: dispcc
+# protected-clocks + framebuffer MDSS_GDSC power-domain). The kernel itself boots
+# from ESP:/r8q.dtb (cmdline `dtb=r8q.dtb`, see scripts/deploy-esp.sh), so later
+# DTB changes go to the ESP and do NOT need a re-flash.
 #
 # Env: MUSIL=<Mu-Silicium checkout>  DTB=<out/.../sm8250-samsung-r8q.dtb>
 set -euo pipefail
