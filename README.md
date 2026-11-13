@@ -41,7 +41,7 @@ into.
 | 11 | **Battery** — MAX77705 fuel gauge (`max17042`) telemetry **+ charging** (`max77705` MFD + charger) | ✅ |
 | 12 | **Wi-Fi** — QCA6390 over PCIe via `ath11k_pci` + MHI; `wlp1s0` scans and associates | ✅ |
 | 13 | **KDE Plasma Mobile** — `sddm` autologin → mobile shell on the Adreno, ~12 s cold boot (GNOME still installed as a fallback) | ✅ |
-| 14 | **CPU wedge root-caused** — the "phone dies under load" bug is `cpu7` never returning from `cpu-sleep-1-0` power collapse; that idle state is now disabled on cpus 4-7 | ✅ fix holding (first 50 min session clean; longer soak still welcome) |
+| 14 | **CPU wedge** — every so often one core stops executing and takes the phone down with it. Localised (any core, A55 or A77; it stops in the cpuidle governor, before WFI) but **not fixed**; disabling the deep idle state only makes it rarer | ⚠️ open — see [`INSTALLATION.md` §11](INSTALLATION.md) |
 
 See the [**Roadmap**](#roadmap) below for what's next (Bluetooth, USB host mode,
 audio, a greeter/lock screen).

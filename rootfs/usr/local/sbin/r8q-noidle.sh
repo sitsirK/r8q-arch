@@ -1,34 +1,33 @@
 #!/bin/bash
-# r8q: keep every CPU out of the idle loop.
+# r8q: keep every CPU out of the idle loop. EXPERIMENTAL -- this is not a fix for the CPU
+# wedge and there is no measurement showing that it prevents one. See INSTALLATION.md §11.
 #
-# WHY. On this device a core can enter idle and never come back out. RCU then reports it as
-# idle forever and it does not answer an IPI:
+# BACKGROUND. On this device a core occasionally stops executing while the others carry on:
 #
 #   rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
 #   rcu:   5-...0: (1 GPs behind) idle=2344/1/0x4000000000000000 softirq=59911/59914
 #   Sending NMI from CPU 6 to CPUs 5:      <- no backtrace comes back
 #
-# (An even 'idle=' counter means RCU is not watching that CPU, i.e. it believes it is idle.)
-# Everything that needs a global IPI then blocks behind it, userspace stops being scheduled,
-# and the box is gone while the kernel still prints. Session 5h blamed the deep
-# 'cpu-sleep-1-0' power-collapse state and disabled it on cpus 4-7; that made the failure much
-# rarer but did NOT fix it — cores have since been lost with every power-collapse state
-# disabled, i.e. while they were only ever allowed to sit in plain WFI (cpu5 twice, cpu2 once).
-# So it is idle ENTRY itself that is unsafe here, not one particular idle state. Suspected
-# firmware side: Mu-Silicium's PSCI reports 'OSI mode supported' and then refuses to be put
-# into Platform-Coordinated mode ('[Firmware Bug]: failed to set PC mode: -3').
+# This script was written for the theory that a core sitting in WFI misses its wake-up, so
+# that idle ENTRY is what is unsafe. That theory is wrong:
+#   - the one function trace of a dying core ends in the cpuidle governor (menu_select),
+#     before WFI is reached, and the dead core does not answer an NMI either -- it has
+#     stopped, it is not waiting for an interrupt;
+#   - idle-entry rate is not the trigger: ~15 million forced idle entries in 75 s did not
+#     wedge the phone;
+#   - for the same reason a periodic per-CPU timer "heartbeat" does not help: cores have died
+#     with a pinned thread waking each of them every 10 ms.
 #
-# WHAT THIS DOES. A SCHED_IDLE task is only picked when a CPU would otherwise have nothing to
-# run, so one pinned per core means the idle loop is never entered, while real work keeps
-# 100% of the CPU. Measured: WFI entries across all 8 cores drop from ~300/s to ~4/s.
+# WHY IT IS STILL HERE. The traced death did happen on the way into idle, and spinners keep
+# the cores out of that path. So it remains a cheap experiment -- nothing more. Earlier claims
+# in this file that it "carried a 220-crate build to completion" should not be trusted: the
+# installed copy was later found corrupt, so it had most likely never run.
 #
-# COST. No core ever sleeps -> constant power draw and heat. Run it for heavy work (a
-# `makepkg` of anything Rust reliably wedged the phone within a minute without it, and
-# completed a 220-crate build with it), not as a permanent boot service.
+# WHAT IT DOES. A SCHED_IDLE task is only picked when a CPU would otherwise have nothing to
+# run, so one pinned per core means the idle loop is almost never entered, while real work
+# keeps 100% of the CPU. Measured: WFI entries across all 8 cores drop from ~300/s to ~4/s.
 #
-# The kernel-side equivalent, if you would rather pay this cost permanently and drop the
-# spinners, is `nohlt` on the cmdline (arm64 selects GENERIC_IDLE_POLL_SETUP, so the generic
-# polling idle loop is available) — that needs an Image rebuild, CONFIG_CMDLINE_FORCE is set.
+# COST. No core ever sleeps -> constant power draw and heat. Never run it as a boot service.
 set -u
 
 ncpu=$(nproc)

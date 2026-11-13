@@ -134,9 +134,28 @@ That provides `/lib/firmware/qcom/a650_sqe.fw` and `a650_gmu.bin`.
 **b) The zap shader — from YOUR device's stock firmware.** Samsung's TrustZone
 only authenticates a **Samsung-signed** zap; the generic
 `qcom/sm8250/a650_zap.mbn` from linux-firmware is rejected (`-22`) and the GPU
-then silently drops every render write. Get the stock firmware for your model
-(e.g. the AP tarball from samfw/frija), pull `a650_zap.mdt` + `a650_zap.b00/.b01/.b02`
-out of the `vendor` image (`/vendor/firmware/`), and install them as:
+then silently drops every render write.
+
+**It is already on the phone — you do not need to download stock firmware.** The
+signed PIL images live on the **`apnhlos`** partition (what Android mounts at
+`/vendor/firmware_mnt`). It is *not* inside `super.img`, and `/vendor/firmware/`
+holds only the unsigned blobs (`a650_sqe.fw`, `a650_gmu.bin`) — so extracting the
+`vendor` image will never find the zap. Copy it straight off the phone over SSH:
+
+```bash
+mkdir -p /mnt/fw && mount -o ro /dev/disk/by-partlabel/apnhlos /mnt/fw
+ls -l /mnt/fw/image | grep -i zap
+#   want: a650_zap.mdt, a650_zap.b00, a650_zap.b01, a650_zap.b02
+
+install -Dm644 /mnt/fw/image/a650_zap.mdt /lib/firmware/qcom/sm8250/a650_zap.mbn
+for s in b00 b01 b02; do
+  install -Dm644 /mnt/fw/image/a650_zap.$s /lib/firmware/qcom/sm8250/a650_zap.$s
+done
+umount /mnt/fw
+```
+
+The `.mdt` is deliberately renamed to `.mbn`; the `.bNN` segments keep their
+names. Resulting layout:
 
 ```
 /lib/firmware/qcom/sm8250/a650_zap.mbn    <- the stock a650_zap.mdt, renamed
@@ -144,6 +163,10 @@ out of the `vendor` image (`/vendor/firmware/`), and install them as:
 /lib/firmware/qcom/sm8250/a650_zap.b01
 /lib/firmware/qcom/sm8250/a650_zap.b02
 ```
+
+You have just overwritten a file owned by `linux-firmware-qcom` — see
+[Protect the Samsung zap shader from pacman](#protect-the-samsung-zap-shader-from-pacman)
+below before your next `-Syu`.
 
 **c) Module options + post-boot load.** The [`rootfs/`](rootfs/) overlay ships
 these (already in place if you re-ran the overlay):
@@ -247,25 +270,50 @@ mode and the fault is above MHI, not in the firmware.
 
 ---
 
-## 11. The CPU-wedge workaround (do this before running any desktop)
+## 11. The CPU wedge — an open bug and its partial mitigation
 
-Without this the phone stops dead under load. It is **not** a display or GPU
-fault: **a core enters idle and never comes back out.** RCU reports it plainly,
-printing that CPU with an **even** dynticks counter
-(`idle=…/1/0x4000000000000000`), i.e. it believes the core is idle, and the same
-frozen values are still there in every stall report minutes later. Everything
-that needs a global IPI then blocks behind it — which is why the visible
-backtraces are usually innocent victims in `kick_all_cpus_sync ← __text_poke`.
+**This is not fixed.** Every so often one CPU core simply stops executing while
+the other seven carry on, and the phone dies shortly afterwards. It is not a
+display, GPU or thermal fault and it is not tied to a workload: it has happened
+during a compile, inside a game, and on a nearly idle phone with nothing but an
+SSH session open.
 
-The tell is unmistakable once you know it: **the kernel keeps answering ICMP
-while userspace stops entirely** — `ping` stays at ~2 ms while `sshd` cannot even
-emit its version banner (`Connection timed out during banner exchange`). It
-usually degrades to a full hang after that; recovery is the physical VolUp+Power
-combo either way.
+How to recognise it: **the kernel keeps answering ICMP while userspace stops** —
+`ping` stays at ~2 ms while `ssh` fails with `Connection timed out during banner
+exchange`. The kernel log shows an RCU stall naming one CPU, followed by an NMI
+backtrace request that this CPU never answers. It usually degrades to a full hang
+or a reset within a minute or two; recovery is the physical VolUp+Power combo.
 
-**a) Disable the deep idle state on every core.** This is a mitigation, not a
-cure: cores have been lost with it applied. It does make the failure much rarer,
-because power collapse fails far more often than plain WFI does.
+What has been measured so far:
+
+- **Any core can die** — the Cortex-A55s (cpu0-3) as well as the A77s (cpu4-7),
+  sometimes two or three of them within a second.
+- **The core is not asleep, it has stopped.** Idle cores answer the NMI backtrace
+  request (`skipped: idling at cpu_do_idle`); the dead one prints nothing at all.
+  The one time a dying core was function-traced, its last call was in the cpuidle
+  governor (`menu_select()`) — ordinary C code, *before* it ever reached WFI.
+- **It is not the deep idle state.** It reproduces with `state1` disabled on all
+  eight cores and not a single power-collapse entry since boot. Earlier versions
+  of this page blamed `cpu7` and the `cpu-sleep-1-0` state, and then lost
+  wake-ups from WFI. Both were wrong.
+- **One dead core takes the whole phone with it** because of what queues up
+  behind it: everything that needs an all-CPU IPI (which is why the backtraces
+  you do see are innocent victims in `kick_all_cpus_sync ← __text_poke`), and,
+  when the dead core is cpu0, every RPMh request — the `apps_rsc` interrupt is
+  affine to cpu0, hence `rpmh_write_batch ... Error sending AMC RPMH requests
+  (-110)`.
+
+The cause is still unknown. The working theory is that the core loses its clock
+(a CPU frequency transition that never completes), but that is unproven.
+
+**What does not fix it:** a "heartbeat" that wakes every core from a per-CPU
+timer every few tens of milliseconds. The watchdog used to catch the wedge does
+exactly that, one pinned thread per core every 10 ms, and cores died while it ran.
+
+**a) Disable the deep idle state on every core.** Worth installing, but the case
+for it is purely empirical: the phone wedged within minutes of desktop use before
+it and has run for days with it. Cores are still lost with it applied, so read it
+as "rarer", not "fixed".
 
 ```bash
 install -Dm644 rootfs/etc/tmpfiles.d/50-r8q-cpuidle.conf \
@@ -277,12 +325,14 @@ for c in 0 1 2 3 4 5 6 7; do echo -n "cpu$c=$(cat /sys/devices/system/cpu/cpu$c/
 #   want: all 1
 ```
 
-**b) For heavy work, stop the cores idling at all.** What actually correlates
-with the wedge is idle-entry rate, not utilisation: a compile idles the cores
-~500×/s and kills the phone within a minute, while an 8-core spin loop at 85 °C
-runs indefinitely. A `SCHED_IDLE` spinner pinned to each core keeps the idle loop
-from ever being entered and costs real work nothing, because SCHED_IDLE only runs
-when a CPU would otherwise have had nothing to do.
+**b) `r8q-noidle` (optional, unproven).** A `SCHED_IDLE` spinner pinned to each
+core, so the idle loop is almost never entered. It was written for the
+lost-wake-up theory, which is dead; it is kept because the one traced death did
+happen on the way into idle. There is **no measurement showing that it prevents
+the wedge** — idle-entry rate alone is not the trigger (15 million forced idle
+entries in 75 s did not wedge the phone) — and it costs power and heat, since no
+core ever sleeps while it runs. Use it to experiment, not as a fix, and never as
+a boot service.
 
 ```bash
 install -Dm755 rootfs/usr/local/sbin/r8q-noidle.sh /usr/local/sbin/r8q-noidle.sh
@@ -290,15 +340,9 @@ install -Dm644 rootfs/etc/systemd/system/r8q-noidle.service \
                /etc/systemd/system/r8q-noidle.service
 systemctl daemon-reload
 
-# around anything heavy (a Rust build will not survive without it):
-systemctl start r8q-noidle
-cd ~/paru && makepkg -si
+systemctl start r8q-noidle      # ... heavy work ...
 systemctl stop r8q-noidle
 ```
-
-It is deliberately not enabled at boot: no core ever sleeps while it runs. The
-in-kernel equivalent, if you would rather pay that permanently, is `nohlt` on the
-cmdline — that needs an `Image` rebuild, since `CONFIG_CMDLINE_FORCE=y`.
 
 ## 12. KDE Plasma Mobile
 
@@ -381,6 +425,7 @@ Two more things that bite on a fresh ALARM rootfs:
   `/etc`). `systemd-tmpfiles` then fails during package installs with
   `Detected unsafe path transition / (owned by alarm) → /dev`. Fix once with
   `chown root:root / /usr && chmod 755 /`.
-- **`systemctl reboot` does not come back.** Mu-Silicium lives on the `RECOVERY`
-  partition, so returning to Linux always needs the physical
-  **VolUp+Power with USB connected** combo.
+- **`systemctl reboot` does not come back by itself.** Returning to Linux needs
+  the physical **VolUp+Power with USB connected** combo, so never reboot a phone
+  that nobody can reach. (Mu-Silicium is on `BOOT`, as flashed in step 3; the
+  stock `RECOVERY` partition is left alone.)

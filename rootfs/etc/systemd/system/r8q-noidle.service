@@ -1,11 +1,11 @@
 [Unit]
-Description=r8q: keep every CPU out of idle (works around lost wake-ups from WFI)
+Description=r8q: keep every CPU out of idle (experimental, not a fix for the CPU wedge)
 Documentation=file:/usr/local/sbin/r8q-noidle.sh
 
 # Deliberately NOT enabled at boot: this stops the CPUs from ever sleeping, which costs
-# power and heat. Start it around heavy work and stop it afterwards:
+# power and heat, and it is unproven as a mitigation (see the script's header). To try it:
 #
-#   systemctl start r8q-noidle && makepkg -si ; systemctl stop r8q-noidle
+#   systemctl start r8q-noidle ; <heavy work> ; systemctl stop r8q-noidle
 
 [Service]
 Type=simple
