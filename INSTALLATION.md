@@ -8,6 +8,68 @@ Throughout: `$KSRC` = your mainline kernel source, `$OUT` = its build dir
 (`O=`), `$MUSIL` = your Mu-Silicium checkout. `KV` is the kernel release (e.g.
 `7.1.2`).
 
+Two ways in:
+- **The alarminstall image** (next section): flash UEFI once (§2–3), boot the
+  installer from a microSD card, pick a desktop with the volume keys. No kernel
+  build, no mass-storage mode.
+- **By hand** (§1–8): build everything yourself, install from the PC.
+
+---
+
+## 0. The alarminstall image
+
+[alarminstall](https://github.com/sitsirK/alarminstall) is archinstall adapted
+to this phone, on a bootable image. It installs Arch Linux ARM with the r8q
+kernel, GPU acceleration, touch, Wi-Fi and a desktop (Plasma Mobile, GNOME and
+Sway are tested). It **erases `userdata`** and formats `cache` as the ESP; the
+partition table is not changed.
+
+**UEFI with SD-card support.** Upstream Mu-Silicium does not see the SD card on
+this phone. Build §2 from
+[sitsirK/Mu-Silicium](https://github.com/sitsirK/Mu-Silicium) with branches
+`sd-card-power` (powers the slot) and `sd-card-boot-option` (adds "SD Card" to
+the boot menu) merged; `r8q.dtb` from the release can stand in for a DTB you
+built. Flash it (§3).
+
+**The card.** Download `alarminstall-r8q-<date>.iso` and `SHA256SUMS` from this
+repository's Releases, then:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+sudo dd if=alarminstall-r8q-<date>.iso of=/dev/<sdcard> bs=4M conv=fsync
+```
+
+or copy the `.iso` onto a [Ventoy](https://www.ventoy.net) card (several
+versions side by side are fine).
+
+**Boot it.** Reboot, press **Vol-Up** at "[Volume Up] Boot Manager", pick
+**SD Card**. About 50 s later the installer is on the screen: **Vol-Up /
+Vol-Down** move (hold to scroll), **Power** selects. Choices are marked: plain =
+tested, yellow = untested, red and struck through = not supported yet.
+
+**Get online.** Packages are downloaded during the install, and the phone has
+no keyboard for a Wi-Fi password. Plug it into a PC (the PC gets an address over
+USB; the bar at the bottom of the phone's screen shows where to connect):
+
+```bash
+ssh root@172.16.42.1                  # password root; the host key changes every boot
+nmtui                                 # or: nmcli dev wifi connect "NAME" password "PASSWORD"
+tmux attach -t alarminstall           # the same installer, with your keyboard
+```
+
+If it gave up waiting for the network, type `alarminstall`. The Wi-Fi network
+is copied to the installed system. A Linux PC can share its own connection
+instead: [`scripts/host-tether.sh`](scripts/host-tether.sh) (§8).
+
+**After the install** pick reboot; internal storage boots first again. Hostname
+`alarm`, root password `alarm`, user `alarm` / `alarm` (sudo). Root can log in
+with that password over SSH (USB and Wi-Fi): **change both** (`passwd`). The
+installed system serves no addresses over USB: give the PC `172.16.42.14` as in
+§7.
+
+The image carries linux-firmware's QCA6390 Wi-Fi firmware. The Samsung-signed
+GPU zap shader is not on it: the installer copies it from your phone (§9).
+
 ---
 
 ## 1. Build the kernel (Image + DTB)

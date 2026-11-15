@@ -13,7 +13,8 @@ into.
 
 > **Read [`PREREQUISITES.md`](PREREQUISITES.md) first** (unlocked bootloader,
 > host packages, and the fact that this **wipes your userdata**), then follow
-> **[`INSTALLATION.md`](INSTALLATION.md)**.
+> **[`INSTALLATION.md`](INSTALLATION.md)**. The quickest way is its §0: a
+> bootable installer image (Releases) you run from a microSD card.
 
 > **No proprietary firmware is shipped.** Storage, USB and display run on
 > built-in mainline drivers with no firmware at all. GPU acceleration needs the
