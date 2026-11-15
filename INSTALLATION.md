@@ -63,7 +63,7 @@ instead: [`scripts/host-tether.sh`](scripts/host-tether.sh) (§8).
 
 **After the install** pick reboot; internal storage boots first again. Hostname
 `alarm`, root password `alarm`, user `alarm` / `alarm` (sudo). Root can log in
-with that password over SSH (USB and Wi-Fi): **change both** (`passwd`). The
+with that password over SSH (USB and Wi-Fi): **change both** after install or in alarminstall if you did it via ssh or a usb keyboard (`passwd`). The
 installed system serves no addresses over USB: give the PC `172.16.42.14` as in
 §7.
 
