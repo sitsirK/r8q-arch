@@ -14,12 +14,15 @@ Type=oneshot
 ExecStart=/usr/bin/insmod /root/ts/max17042_battery.ko
 ExecStart=/usr/bin/insmod /root/ts/max77705.ko
 ExecStart=/usr/bin/insmod /root/ts/max77705_charger.ko
-# Raise the charge input above the 500 mA USB-SDP default. Mainline has no
-# MAX77705 MUIC driver, so the port type is never detected and the charger
-# stays at SDP -- at which point a running GNOME session draws MORE than the
-# charger is allowed to pull from VBUS and the pack discharges while plugged
-# in. 700 mA (rounds to 725) makes the net battery current positive.
-ExecStartPost=/bin/sh -c 'C=/sys/class/power_supply/max77705-charger; for i in $(seq 20); do [ -e $C/input_current_limit ] && break; sleep 1; done; echo 700000 > $C/input_current_limit; echo 1000000 > $C/constant_charge_current'
+# USB Type-C / MUIC block (patches/0009), after the charger: it closes the USB
+# data switch (no replug after a reboot) and sets the charger's input current
+# limit from the detected port type on every attach (DCP 1.5-3 A, CDP 1.5 A).
+# sdp_ua: at the 500 mA spec value for a PC port, a running Plasma session uses
+# more than the charger may draw and the pack discharges while plugged in;
+# 700 mA (rounds to 725) keeps it net positive. '-' so a missing module never fails the unit.
+ExecStart=-/usr/bin/insmod /root/ts/max77705_usbc.ko sdp_ua=700000
+# Battery charge current 1 A. The input current limit is max77705_usbc's job.
+ExecStartPost=/bin/sh -c 'C=/sys/class/power_supply/max77705-charger; for i in $(seq 20); do [ -e $C/constant_charge_current ] && break; sleep 1; done; echo 1000000 > $C/constant_charge_current'
 RemainAfterExit=yes
 
 [Install]

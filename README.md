@@ -119,10 +119,10 @@ The short version of what each part needs. The details are in
   on purpose**: s2idle hard-resets this SoC.
 - **Battery** — MAX77705 on `i2c0`: fuel gauge through mainline
   `max17042_battery`, charging through the `max77705` MFD + charger
-  (`patches/0005` accepts the PASS2 revision this phone has). Mainline cannot
-  detect the USB port type, so the charger would sit at 500 mA;
-  `r8q-battery.service` raises the input limit to 700 mA so the pack still
-  charges under a running desktop.
+  (`patches/0005` accepts the PASS2 revision this phone has). `patches/0009`
+  adds a driver for its USB-C block: it routes the USB data lines to the SoC
+  (no cable replug after a reboot) and sets the charger's input limit from the
+  detected port type (1.5 A on a wall charger, 700 mA on a PC).
 - **Wi-Fi** — QCA6390 on PCIe via `ath11k_pci` + MHI, firmware from
   `linux-firmware`. `r8q-wifi.service` loads the stack in order. Two modules are
   easy to miss, and Wi-Fi fails silently without them: `phy-qcom-qmp-pcie` and

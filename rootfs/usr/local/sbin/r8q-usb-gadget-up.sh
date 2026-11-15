@@ -21,7 +21,10 @@ ln -sf "$G/functions/ncm.usb0" "$G/configs/c.1/" 2>/dev/null || true
 # reboot it reads 0x3f (both lines OPEN) and the host never sees the gadget
 # until the cable is replugged; mainline has no MUIC driver to close it.
 # Needs i2c-tools; i2c0 comes up with r8q-touch/r8q-battery, so retry.
-if command -v i2ctransfer >/dev/null; then
+# max77705_usbc.ko does this itself when loaded (and then owns 0x25).
+if [ -e /sys/bus/i2c/devices/0-0025/driver ]; then
+	echo "r8q-gadget: MUIC switch handled by $(basename "$(readlink /sys/bus/i2c/devices/0-0025/driver)")"
+elif command -v i2ctransfer >/dev/null; then
 	for i in 1 2 3 4 5 6 7 8 9 10; do
 		i2ctransfer -y 0 w3@0x25 0x21 0x06 0x09 2>/dev/null &&
 			i2cset -y 0 0x25 0x41 0x00 2>/dev/null &&

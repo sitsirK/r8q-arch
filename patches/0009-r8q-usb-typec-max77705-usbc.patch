@@ -1,0 +1,536 @@
+From: r8q bring-up <r8q@localhost>
+Subject: [PATCH] r8q: usb: typec: add MAX77705 USB Type-C / MUIC driver
+
+The MAX77705's USB Type-C / MUIC block (i2c 0x25, PMIC INTSRC bit 3) has no
+mainline driver. Its USB 2.0 data switch (COMN1/COMP2) is opened by the vendor
+kernel's shutdown path and stays open across a warm reboot, so after any
+reboot the USB peripheral is invisible to the host until the cable is
+replugged and the block's firmware re-detects the port.
+
+This driver talks to the block's firmware through its opcode mailbox (write
+opcode + data from 0x21, 0x00 to 0x41; reply from 0x51, announced by
+APCmdResI), closes the switch (CTRL1 COMN1SW/COMP2SW = USB) whenever a data
+port is attached, and sets the charger's input current limit from the BC1.2
+type it detects (SDP: sdp_ua, default 500 mA; CDP and DCP 1.5 A; the
+proprietary Samsung/Apple 2 A, Apple 12 W and 3 A DCP types accordingly; back
+to sdp_ua on detach). Without it the charger keeps whatever limit it had, so
+on a wall charger a busy system out-draws a 500 mA input and discharges the
+battery while plugged in (r8q: -358 mA at 725 mA, +168 mA at 1.5 A, same
+load). Once CTRL1 has been written by the AP, the firmware leaves the switch
+open on each new attach, so the driver has to stay loaded for hot-plug.
+
+Bind it with a sibling node next to the PMIC, like the charger:
+
+	usbc@25 {
+		compatible = "maxim,max77705-usbc";
+		reg = <0x25>;
+		interrupt-parent = <&max77705>;
+		interrupts = <3>;
+	};
+
+Register and opcode layout from Samsung's downstream drivers
+(drivers/ccic/max77705_usbc.c, drivers/muic/max77705-muic.c).
+---
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -77,6 +77,20 @@
+ 	  If you choose to build this driver as a dynamically linked module, the
+ 	  module will be called rt1719.ko
+ 
++config TYPEC_MAX77705
++	tristate "Maxim MAX77705 USB Type-C / MUIC driver"
++	depends on I2C
++	depends on MFD_MAX77705 || COMPILE_TEST
++	select REGMAP_I2C
++	help
++	  Say Y or M here to support the USB Type-C / MUIC block of the
++	  Maxim MAX77705 PMIC (Samsung Galaxy S9, S20 FE and others). It
++	  routes the USB data lines to the application processor and sets
++	  the charger's input current limit from the detected BC1.2 type.
++
++	  If you choose to build this driver as a dynamically linked module,
++	  the module will be called max77705_usbc.ko.
++
+ config TYPEC_HD3SS3220
+ 	tristate "TI HD3SS3220 Type-C DRP Port controller driver"
+ 	depends on I2C
+--- a/drivers/usb/typec/Makefile
++++ b/drivers/usb/typec/Makefile
+@@ -7,6 +7,7 @@
+ obj-$(CONFIG_TYPEC_UCSI)	+= ucsi/
+ obj-$(CONFIG_TYPEC_TPS6598X)	+= tipd/
+ obj-$(CONFIG_TYPEC_ANX7411)	+= anx7411.o
++obj-$(CONFIG_TYPEC_MAX77705)	+= max77705_usbc.o
+ obj-$(CONFIG_TYPEC_HD3SS3220)	+= hd3ss3220.o
+ obj-$(CONFIG_TYPEC_STUSB160X) 	+= stusb160x.o
+ obj-$(CONFIG_TYPEC_RT1719)	+= rt1719.o
+--- /dev/null
++++ b/drivers/usb/typec/max77705_usbc.c
+@@ -0,0 +1,467 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Maxim MAX77705 USB Type-C / MUIC block
++ *
++ * The block sits at its own i2c address (0x25) next to the MAX77705 PMIC and
++ * signals through the PMIC's interrupt (INTSRC bit 3). It is run by on-chip
++ * firmware that the host talks to through an opcode mailbox: write the opcode
++ * and its data from 0x21, then 0x00 to 0x41; the reply appears from 0x51 and
++ * is announced by the APCmdResI interrupt.
++ *
++ * This driver currently does what nothing else in mainline does:
++ *  - route the USB 2.0 data lines (COMN1/COMP2) to the AP. The switch is
++ *    opened by the vendor kernel's shutdown path and stays open across a warm
++ *    reboot, so the USB peripheral is invisible to the host until the cable
++ *    is replugged;
++ *  - report the BC1.2 charger type the block detects on every attach, and
++ *    set the charger's input current limit to match it.
++ *
++ * Register and opcode layout from Samsung's downstream drivers
++ * (drivers/ccic/max77705_usbc.c, drivers/muic/max77705-muic.c).
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/completion.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define USBC_REG_HW_REV		0x00
++#define USBC_REG_FW_REV		0x01
++#define USBC_REG_UIC_INT	0x02
++#define USBC_REG_CC_INT		0x03
++#define USBC_REG_PD_INT		0x04
++#define USBC_REG_VDM_INT	0x05
++#define USBC_REG_STATUS1	0x06
++#define USBC_REG_STATUS2	0x07
++#define USBC_REG_BC_STATUS	0x08
++#define USBC_REG_FW_MINOR	0x09
++#define USBC_REG_CC_STATUS0	0x0a
++#define USBC_REG_CC_STATUS1	0x0b
++#define USBC_REG_PD_STATUS0	0x0c
++#define USBC_REG_PD_STATUS1	0x0d
++#define USBC_REG_UIC_INT_M	0x0e
++#define USBC_REG_CC_INT_M	0x0f
++#define USBC_REG_PD_INT_M	0x10
++#define USBC_REG_VDM_INT_M	0x11
++#define USBC_REG_OPCODE		0x21
++#define USBC_REG_OPCODE_END	0x41
++#define USBC_REG_OPCODE_RES	0x51
++#define USBC_REG_MAX		0x70
++
++#define USBC_OPCODE_DATA_LEN	32
++
++/* UIC_INT / UIC_INT_M */
++#define UIC_INT_APCMDRES	BIT(7)
++#define UIC_INT_SYSMSG		BIT(6)
++#define UIC_INT_VBUSDET		BIT(5)
++#define UIC_INT_VBADC		BIT(4)
++#define UIC_INT_DCDTMO		BIT(3)
++#define UIC_INT_FAKVB		BIT(2)
++#define UIC_INT_CHGTYP		BIT(1)
++#define UIC_INT_UIDADC		BIT(0)
++#define UIC_INT_USED		(UIC_INT_APCMDRES | UIC_INT_SYSMSG | \
++				 UIC_INT_VBUSDET | UIC_INT_DCDTMO | \
++				 UIC_INT_CHGTYP)
++
++/* BC_STATUS */
++#define BC_STATUS_VBUSDET	BIT(7)
++#define BC_STATUS_PRCHGTYP	GENMASK(5, 3)
++#define BC_STATUS_DCDTMO	BIT(2)
++#define BC_STATUS_CHGTYP	GENMASK(1, 0)
++
++/* Opcodes */
++#define OPCODE_CTRL1_R		0x05
++#define OPCODE_CTRL1_W		0x06
++
++/* CTRL1: COMN1SW [2:0], COMP2SW [5:3]; 1 = USB (AP), 7 = open */
++#define CTRL1_COMN1SW		GENMASK(2, 0)
++#define CTRL1_COMP2SW		GENMASK(5, 3)
++#define CTRL1_SW_USB		1
++#define CTRL1_SW_OPEN		7
++#define CTRL1_USB		(FIELD_PREP(CTRL1_COMN1SW, CTRL1_SW_USB) | \
++				 FIELD_PREP(CTRL1_COMP2SW, CTRL1_SW_USB))
++
++#define USBC_CMD_TIMEOUT_MS	500
++
++#define CHGTYP_NONE		0
++#define CHGTYP_SDP		1
++#define CHGTYP_CDP		2
++#define CHGTYP_DCP		3
++
++#define PRCHGTYP_SAMSUNG_2A	1
++#define PRCHGTYP_APPLE_0A5	2
++#define PRCHGTYP_APPLE_1A	3
++#define PRCHGTYP_APPLE_2A	4
++#define PRCHGTYP_APPLE_12W	5
++#define PRCHGTYP_DCP_3A		6
++
++static unsigned int sdp_ua = 500000;
++module_param(sdp_ua, uint, 0644);
++MODULE_PARM_DESC(sdp_ua,
++		 "Input current limit for a standard USB host port, in uA (default 500000)");
++
++static char *charger_name = "max77705-charger";
++module_param(charger_name, charp, 0444);
++MODULE_PARM_DESC(charger_name, "power_supply whose input current limit to set");
++
++static const char * const chgtyp_names[] = {
++	"none", "SDP", "CDP", "DCP",
++};
++
++static const char * const prchgtyp_names[] = {
++	"unknown", "Samsung 2A", "Apple 0.5A", "Apple 1A",
++	"Apple 2A", "Apple 12W", "3A DCP", "reserved",
++};
++
++struct max77705_usbc {
++	struct device *dev;
++	struct regmap *regmap;
++	int irq;
++
++	struct mutex cmd_lock;		/* one mailbox command at a time */
++	struct completion cmd_done;
++	struct work_struct attach_work;
++
++	u8 bc_status;			/* last BC_STATUS reported */
++	bool bc_valid;
++	int ilim_ua;			/* last input limit applied, 0 = none */
++};
++
++static const struct regmap_config max77705_usbc_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = USBC_REG_MAX,
++	.cache_type = REGCACHE_NONE,
++};
++
++/*
++ * Run one mailbox command. @wdata/@wlen is the payload after the opcode;
++ * @rdata/@rlen receives the reply after its opcode echo byte.
++ */
++static int max77705_usbc_cmd(struct max77705_usbc *usbc, u8 opcode,
++			     const u8 *wdata, size_t wlen, u8 *rdata, size_t rlen)
++{
++	u8 buf[USBC_OPCODE_DATA_LEN + 1];
++	int ret;
++
++	if (wlen > USBC_OPCODE_DATA_LEN || rlen > USBC_OPCODE_DATA_LEN)
++		return -EINVAL;
++
++	buf[0] = opcode;
++	if (wlen)
++		memcpy(&buf[1], wdata, wlen);
++
++	mutex_lock(&usbc->cmd_lock);
++	reinit_completion(&usbc->cmd_done);
++
++	ret = regmap_bulk_write(usbc->regmap, USBC_REG_OPCODE, buf, wlen + 1);
++	if (!ret && wlen < USBC_OPCODE_DATA_LEN)
++		ret = regmap_write(usbc->regmap, USBC_REG_OPCODE_END, 0x00);
++	if (ret)
++		goto out;
++
++	if (!wait_for_completion_timeout(&usbc->cmd_done,
++					 msecs_to_jiffies(USBC_CMD_TIMEOUT_MS))) {
++		/* The command still runs; only the completion IRQ is missing. */
++		dev_warn(usbc->dev, "opcode 0x%02x: no APCmdRes interrupt\n",
++			 opcode);
++	}
++
++	if (rlen) {
++		ret = regmap_bulk_read(usbc->regmap, USBC_REG_OPCODE_RES, buf,
++				       rlen + 1);
++		if (ret)
++			goto out;
++		if (buf[0] != opcode) {
++			dev_err(usbc->dev, "opcode 0x%02x: reply is for 0x%02x\n",
++				opcode, buf[0]);
++			ret = -EIO;
++			goto out;
++		}
++		memcpy(rdata, &buf[1], rlen);
++	}
++out:
++	mutex_unlock(&usbc->cmd_lock);
++	return ret;
++}
++
++static int max77705_usbc_read_ctrl1(struct max77705_usbc *usbc, u8 *val)
++{
++	return max77705_usbc_cmd(usbc, OPCODE_CTRL1_R, NULL, 0, val, 1);
++}
++
++/* Route D+/D- to the AP's USB PHY (Samsung: com_to_usb_ap()). */
++static int max77705_usbc_switch_to_usb(struct max77705_usbc *usbc)
++{
++	u8 ctrl1 = 0, val;
++	int ret;
++
++	ret = max77705_usbc_read_ctrl1(usbc, &ctrl1);
++	if (ret)
++		return ret;
++
++	if ((ctrl1 & (CTRL1_COMN1SW | CTRL1_COMP2SW)) == CTRL1_USB)
++		return 0;
++
++	/* Keep RCPS / NoBCComp, replace only the two switch fields. */
++	val = (ctrl1 & ~(CTRL1_COMN1SW | CTRL1_COMP2SW)) | CTRL1_USB;
++	ret = max77705_usbc_cmd(usbc, OPCODE_CTRL1_W, &val, 1, NULL, 0);
++	if (ret)
++		return ret;
++
++	dev_info(usbc->dev, "USB data switch 0x%02x -> 0x%02x (AP)\n",
++		 ctrl1, val);
++	return 0;
++}
++
++/* Input current a detected port may supply, per BC1.2 + proprietary types. */
++static int max77705_usbc_port_ua(unsigned int bc)
++{
++	if (!(bc & BC_STATUS_VBUSDET))
++		return sdp_ua;	/* start the next attach conservatively */
++
++	switch (FIELD_GET(BC_STATUS_CHGTYP, bc)) {
++	case CHGTYP_SDP:
++		return sdp_ua;
++	case CHGTYP_CDP:
++		return 1500000;
++	case CHGTYP_DCP:
++		switch (FIELD_GET(BC_STATUS_PRCHGTYP, bc)) {
++		case PRCHGTYP_APPLE_0A5:
++			return 500000;
++		case PRCHGTYP_APPLE_1A:
++			return 1000000;
++		case PRCHGTYP_SAMSUNG_2A:
++		case PRCHGTYP_APPLE_2A:
++			return 2000000;
++		case PRCHGTYP_APPLE_12W:
++			return 2400000;
++		case PRCHGTYP_DCP_3A:
++			return 3000000;
++		default:
++			return 1500000;
++		}
++	default:
++		/* detection still running, or DCD timeout: USB default */
++		return 500000;
++	}
++}
++
++static void max77705_usbc_set_input_limit(struct max77705_usbc *usbc, int ua)
++{
++	union power_supply_propval val = { .intval = ua };
++	struct power_supply *psy;
++	int ret;
++
++	if (ua == usbc->ilim_ua)
++		return;
++
++	psy = power_supply_get_by_name(charger_name);
++	if (!psy) {
++		dev_info(usbc->dev, "%s not registered, input limit left alone\n",
++			 charger_name);
++		return;
++	}
++
++	ret = power_supply_set_property(psy, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++					&val);
++	power_supply_put(psy);
++	if (ret) {
++		dev_err(usbc->dev, "cannot set %s input limit: %d\n",
++			charger_name, ret);
++		return;
++	}
++
++	usbc->ilim_ua = ua;
++	dev_info(usbc->dev, "input current limit %d mA\n", ua / 1000);
++}
++
++static void max77705_usbc_attach_work(struct work_struct *work)
++{
++	struct max77705_usbc *usbc =
++		container_of(work, struct max77705_usbc, attach_work);
++	unsigned int bc;
++	u8 chgtyp, prchgtyp;
++	int ret;
++
++	ret = regmap_read(usbc->regmap, USBC_REG_BC_STATUS, &bc);
++	if (ret) {
++		dev_err(usbc->dev, "BC_STATUS read failed: %d\n", ret);
++		return;
++	}
++
++	chgtyp = FIELD_GET(BC_STATUS_CHGTYP, bc);
++	prchgtyp = FIELD_GET(BC_STATUS_PRCHGTYP, bc);
++
++	if (!usbc->bc_valid || usbc->bc_status != bc) {
++		if (bc & BC_STATUS_VBUSDET)
++			dev_info(usbc->dev,
++				 "VBUS present, charger %s (%s)%s [BC_STATUS 0x%02x]\n",
++				 chgtyp_names[chgtyp], prchgtyp_names[prchgtyp],
++				 (bc & BC_STATUS_DCDTMO) ? ", DCD timeout" : "",
++				 bc);
++		else
++			dev_info(usbc->dev, "VBUS removed [BC_STATUS 0x%02x]\n",
++				 bc);
++		usbc->bc_status = bc;
++		usbc->bc_valid = true;
++	}
++
++	/*
++	 * Close the switch on every attach of a data-capable port. Once the
++	 * AP has written CTRL1, the firmware leaves the switch open (0x3f) on
++	 * each new attach and expects the AP to route it, as Samsung's
++	 * com_to_usb_ap() does.
++	 */
++	max77705_usbc_set_input_limit(usbc, max77705_usbc_port_ua(bc));
++
++	if ((bc & BC_STATUS_VBUSDET) &&
++	    (chgtyp == CHGTYP_SDP || chgtyp == CHGTYP_CDP ||
++	     (bc & BC_STATUS_DCDTMO))) {
++		ret = max77705_usbc_switch_to_usb(usbc);
++		if (ret)
++			dev_err(usbc->dev, "cannot set the USB switch: %d\n",
++				ret);
++	}
++}
++
++static irqreturn_t max77705_usbc_irq(int irq, void *data)
++{
++	struct max77705_usbc *usbc = data;
++	u8 ints[4];
++	int ret;
++
++	/* UIC_INT .. VDM_INT, clear on read */
++	ret = regmap_bulk_read(usbc->regmap, USBC_REG_UIC_INT, ints,
++			       sizeof(ints));
++	if (ret) {
++		dev_err_ratelimited(usbc->dev, "IRQ read failed: %d\n", ret);
++		return IRQ_NONE;
++	}
++
++	dev_dbg(usbc->dev, "irq UIC %02x CC %02x PD %02x VDM %02x\n",
++		ints[0], ints[1], ints[2], ints[3]);
++
++	if (ints[0] & UIC_INT_APCMDRES)
++		complete(&usbc->cmd_done);
++
++	if (ints[0] & (UIC_INT_SYSMSG | UIC_INT_VBUSDET | UIC_INT_DCDTMO |
++		       UIC_INT_CHGTYP))
++		schedule_work(&usbc->attach_work);
++
++	return IRQ_HANDLED;
++}
++
++static void max77705_usbc_cancel_work(void *data)
++{
++	struct max77705_usbc *usbc = data;
++
++	cancel_work_sync(&usbc->attach_work);
++}
++
++static int max77705_usbc_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct max77705_usbc *usbc;
++	unsigned int hw, fw, fw_minor;
++	u8 junk[4];
++	int ret;
++
++	usbc = devm_kzalloc(dev, sizeof(*usbc), GFP_KERNEL);
++	if (!usbc)
++		return -ENOMEM;
++
++	usbc->dev = dev;
++	mutex_init(&usbc->cmd_lock);
++	init_completion(&usbc->cmd_done);
++	INIT_WORK(&usbc->attach_work, max77705_usbc_attach_work);
++	i2c_set_clientdata(client, usbc);
++
++	/* Registered before the IRQ, so it runs after the IRQ is freed. */
++	ret = devm_add_action(dev, max77705_usbc_cancel_work, usbc);
++	if (ret)
++		return ret;
++
++	usbc->regmap = devm_regmap_init_i2c(client, &max77705_usbc_regmap_config);
++	if (IS_ERR(usbc->regmap))
++		return dev_err_probe(dev, PTR_ERR(usbc->regmap), "regmap\n");
++
++	ret = regmap_read(usbc->regmap, USBC_REG_HW_REV, &hw);
++	if (!ret)
++		ret = regmap_read(usbc->regmap, USBC_REG_FW_REV, &fw);
++	if (!ret)
++		ret = regmap_read(usbc->regmap, USBC_REG_FW_MINOR, &fw_minor);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot read revision\n");
++
++	dev_info(dev, "MAX77705 USBC hw 0x%02x fw %02x.%02x\n", hw, fw, fw_minor);
++
++	/* Mask everything, drop stale events, then unmask what we handle. */
++	regmap_write(usbc->regmap, USBC_REG_UIC_INT_M, 0xff);
++	regmap_write(usbc->regmap, USBC_REG_CC_INT_M, 0xff);
++	regmap_write(usbc->regmap, USBC_REG_PD_INT_M, 0xff);
++	regmap_write(usbc->regmap, USBC_REG_VDM_INT_M, 0xff);
++	regmap_bulk_read(usbc->regmap, USBC_REG_UIC_INT, junk, sizeof(junk));
++
++	usbc->irq = client->irq;
++	if (usbc->irq > 0) {
++		ret = devm_request_threaded_irq(dev, usbc->irq, NULL,
++						max77705_usbc_irq, IRQF_ONESHOT,
++						dev_name(dev), usbc);
++		if (ret)
++			return dev_err_probe(dev, ret, "cannot request IRQ\n");
++
++		ret = regmap_write(usbc->regmap, USBC_REG_UIC_INT_M,
++				   (u8)~UIC_INT_USED);
++		if (ret)
++			return dev_err_probe(dev, ret, "cannot unmask IRQs\n");
++	} else {
++		dev_warn(dev, "no IRQ, attach changes will not be seen\n");
++	}
++
++	/* Bring the switch up to date now, then follow attach events. */
++	schedule_work(&usbc->attach_work);
++	flush_work(&usbc->attach_work);
++
++	return 0;
++}
++
++static void max77705_usbc_remove(struct i2c_client *client)
++{
++	struct max77705_usbc *usbc = i2c_get_clientdata(client);
++
++	regmap_write(usbc->regmap, USBC_REG_UIC_INT_M, 0xff);
++}
++
++static const struct of_device_id max77705_usbc_of_match[] = {
++	{ .compatible = "maxim,max77705-usbc" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, max77705_usbc_of_match);
++
++static const struct i2c_device_id max77705_usbc_id[] = {
++	{ "max77705-usbc" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, max77705_usbc_id);
++
++static struct i2c_driver max77705_usbc_driver = {
++	.driver = {
++		.name = "max77705-usbc",
++		.of_match_table = max77705_usbc_of_match,
++	},
++	.probe = max77705_usbc_probe,
++	.remove = max77705_usbc_remove,
++	.id_table = max77705_usbc_id,
++};
++module_i2c_driver(max77705_usbc_driver);
++
++MODULE_DESCRIPTION("Maxim MAX77705 USB Type-C / MUIC driver");
++MODULE_LICENSE("GPL");

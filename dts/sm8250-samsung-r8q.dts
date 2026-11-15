@@ -207,6 +207,19 @@
 	};
 
 	/*
+	 * USB Type-C / MUIC block (max77705_usbc, patches/0009). Closes the
+	 * USB data switch the vendor kernel opens on shutdown and sets the
+	 * charger's input current limit from the BC1.2 port type.
+	 * IRQ 3 = INTSRC USBC of the PMIC above.
+	 */
+	usbc@25 {
+		compatible = "maxim,max77705-usbc";
+		reg = <0x25>;
+		interrupt-parent = <&max77705>;
+		interrupts = <3>;
+	};
+
+	/*
 	 * ModelGauge fuel gauge -- left IRQ-less on purpose so the read-only
 	 * telemetry keeps working even if the charger/MFD above fails to probe
 	 * (the max17042 "Failed to get IRQ" dmesg lines are benign; it polls).
@@ -275,8 +288,13 @@
 		pins = "gpio11";
 		function = "normal";
 		input-enable;
-		bias-disable;
-		power-source = <0>;
+		/*
+		 * Pull-up + power-source 1 (from sam-bee's fork): with
+		 * bias-disable / power-source 0 the level IRQ fired 200001
+		 * times in 5 minutes and i2c0 timed out; now ~2 per boot.
+		 */
+		bias-pull-up;
+		power-source = <1>;
 	};
 };
 
