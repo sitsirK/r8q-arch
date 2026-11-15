@@ -319,6 +319,27 @@
 			regulator-max-microvolt = <1056000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
+
+		/*
+		 * microSD: L6C is the I/O rail (1.8 V <-> 2.96 V, switched for
+		 * UHS signalling), L9C is the card supply. Same two rails as
+		 * the Qualcomm reference boards; stock calls them
+		 * pm8150a_l6 / pm8150a_l9. Both are PLDOs on an 8 mV grid from
+		 * 1.504 V, and these limits are on it.
+		 */
+		vreg_l6c_2p96: ldo6 {
+			regulator-name = "vreg_l6c_2p96";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l9c_2p96: ldo9 {
+			regulator-name = "vreg_l9c_2p96";
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
 	};
 };
 

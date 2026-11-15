@@ -678,3 +678,62 @@
 		};
 	};
 };
+
+/*
+ * microSD slot (hybrid SIM2/SD tray) on SDC2. Wiring is the Qualcomm reference
+ * design: L9C card supply, L6C I/O (switched to 1.8 V for UHS), tray switch on
+ * gpio77.
+ *
+ * Card detect is polled (broken-cd): the core probes the slot once a second,
+ * which notices insertion and removal. Stock uses a tray switch on gpio77
+ * (active high, no bias), but under mainline that line reads low in every
+ * case -- tray in or out, internal pull-up or none, L7A (stock's only
+ * always-on rail) on or off -- so it cannot be used as a detect.
+ */
+&sdhc_2 {
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sdc2_default_state>;
+	pinctrl-1 = <&sdc2_sleep_state>;
+
+	vmmc-supply = <&vreg_l9c_2p96>;
+	vqmmc-supply = <&vreg_l6c_2p96>;
+
+	broken-cd;
+	bus-width = <4>;
+
+	/*
+	 * UHS-I, but not at the full 202 MHz: the one card tested so far
+	 * (a generic 32 GB SDHC) fails about a third of its reads there with
+	 * command and data timeouts -- no CRC errors -- while 100 MHz and
+	 * 3.3 V high-speed both read 256 MiB without a single error. Worth
+	 * lifting once a branded card has been through the same test.
+	 */
+	max-frequency = <100000000>;
+	no-sdio;
+	no-mmc;
+
+	status = "okay";
+};
+
+&tlmm {
+	/* Drive strengths are the stock "on" states (12 / 8 / 8 mA). */
+	sdc2_default_state: sdc2-default-state {
+		clk-pins {
+			pins = "sdc2_clk";
+			drive-strength = <12>;
+			bias-disable;
+		};
+
+		cmd-pins {
+			pins = "sdc2_cmd";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+
+		data-pins {
+			pins = "sdc2_data";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+	};
+};
