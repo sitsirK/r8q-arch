@@ -77,7 +77,8 @@ GPU zap shader is not on it: the installer copies it from your phone (§9).
 Drop the two device-tree files from [`dts/`](dts/) into
 `$KSRC/arch/arm64/boot/dts/qcom/` (they carry the display fix).
 `build_kernel.sh` also applies the kernel patches from [`patches/`](patches/)
-(required for GPU acceleration later — harmless otherwise). Then:
+(required for the display driver and GPU acceleration later — harmless
+otherwise). Then:
 
 ```bash
 # arm64 defconfig + our fragment, LLVM=1, bring-up drivers built-in
@@ -90,7 +91,8 @@ The kernel is built with:
   need a static aarch64 busybox in `bin/busybox`),
 - **`CONFIG_CMDLINE_FORCE`** set to the string in
   [`config/cmdline.txt`](config/cmdline.txt) (the phone has no keyboard, so the
-  cmdline is baked in). Keep `simpledrm` **enabled**.
+  cmdline is baked in). Keep `simpledrm` **enabled**: it is the boot console
+  until `msm` takes the display over (§13).
 
 Outputs: `$OUT/arch/arm64/boot/Image` and
 `$OUT/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb`.
@@ -207,7 +209,8 @@ ssh root@172.16.42.1 'pacman-key --init && pacman-key --populate archlinuxarm &&
 
 Prereq: the kernel was built **with the [`patches/`](patches/) applied**
 (`build_kernel.sh` does this) and its modules are installed on the rootfs —
-at minimum `msm.ko` and its dependencies under `/lib/modules/$KV/`.
+at minimum `msm.ko` and its dependencies under `/lib/modules/$KV/`, plus the
+three display modules from §13.
 
 **a) Userspace + generic firmware** (on the phone, over SSH):
 
@@ -263,10 +266,11 @@ these (already in place if you re-ran the overlay):
   `r8q_zap_dyn=1` is **required**: it loads the zap into dynamically allocated
   RAM; pointing it at the DT carveout makes Samsung's TZ **hard-reset the SoC**.
 - `etc/systemd/system/r8q-gpu.service` — loads `msm` after `multi-user.target`
-  (never let udev coldplug it). `systemctl enable r8q-gpu.service`.
-- `root/.bash_profile` — tty1 autologin waits for `renderD128`, then starts
-  **sway** with the vulkan (turnip) renderer: render node `renderD128`,
-  scanout on simpledrm `card0`.
+  (never let udev coldplug it) and waits for the msm display (§13).
+  `systemctl enable r8q-gpu.service`.
+- `root/.bash_profile` — tty1 autologin waits for `renderD128` and the msm
+  display, then starts **sway** with the vulkan (turnip) renderer: render node
+  `renderD128`, scanout on the msm display card.
 
 **d) Verify** (after a reboot):
 
@@ -474,7 +478,7 @@ llvmpipe.
 
 ```bash
 ls -l /proc/$(pgrep -x kwin_wayland)/fd | grep -o '/dev/dri/[a-zA-Z0-9]*' | sort | uniq -c
-#   want: 3 /dev/dri/card0   and   8 /dev/dri/renderD128
+#   want: 3 of the msm display card (/dev/dri/card2 here)   and   8 /dev/dri/renderD128
 ```
 
 KWin needs no GPU configuration of its own — do **not** port GNOME's
@@ -484,13 +488,94 @@ across. It has a real split display/render-device concept, treats every
 both of ours are platform-bus. If it ever guesses wrong, force it with
 `KWIN_RENDER_NODES=/dev/dri/renderD128`.
 
-Scale is automatic — KWin's phone-panel DPI heuristic yields **2.7** (logical
-400x889) for this display, but only because `patches/0006` makes the connector
-DSI and the DT carries `width-mm`/`height-mm`. Check with `kscreen-doctor -o`,
-which needs `WAYLAND_DISPLAY=wayland-0` in addition to the usual
-`XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS`.
+Scale is automatic: KWin's phone-panel DPI heuristic works from the physical
+size the panel driver reports (67 × 150 mm on a DSI connector). Check with
+`kscreen-doctor -o`, which needs `WAYLAND_DISPLAY` (`wayland-0` or `wayland-1`,
+see `/run/user/1000`) in addition to the usual `XDG_RUNTIME_DIR` /
+`DBUS_SESSION_BUS_ADDRESS`.
 
 GNOME stays installed; revert with `systemctl disable sddm && systemctl enable gdm`.
+
+## 13. Display: mainline msm-drm, 120 Hz, brightness
+
+Without this the panel shows the framebuffer the bootloader lit, scanned out
+through `simpledrm`: 60 frames/s, no brightness control (desktops only dim the
+pixels), no real screen-off, and the compositor copies every frame on the CPU.
+With it, `msm` drives the display engine and the DSI link itself and
+[`patches/0012`](patches/) drives the panel:
+
+- **120 Hz** with real vblank; KWin scans out straight from the GPU,
+- **hardware brightness**: `/sys/class/backlight/ae94000.dsi.0` (0–1023), which
+  is what the desktop's brightness slider then drives,
+- **screen off** really powers the panel down.
+
+**a) Check which panel you have.** The r8q was built with one of three panels,
+and `patches/0012` supports the **S6E3FC3 / AMS646YD01**. Samsung's bootloader
+logs the one it found:
+
+```bash
+mkdir -p /mnt/logfs && mount -o ro /dev/disk/by-label/LOGFS /mnt/logfs
+grep -a -o 'dsi_display0=ss_dsi_panel_[A-Z0-9_]*' /mnt/logfs/UefiLog1.txt | tail -1
+#   want: dsi_display0=ss_dsi_panel_S6E3FC3_AMS646YD01_FHD   (lcd_id=0x805081)
+umount /mnt/logfs
+```
+
+On an EA8079B or EA8076A panel, stop here and keep the `simpledrm` setup (leave
+out the display block of the device tree). The vendor dtbo carries their init
+sequences too, so a driver for them is mostly transcription.
+
+**b) Kernel and device tree.** `build_kernel.sh` applies all three patches, and
+the display block sits at the end of
+[`dts/sm8250-samsung-r8q.dts`](dts/sm8250-samsung-r8q.dts):
+
+- `0010` stops `dispcc` from parking the MDP clock when it registers. Without
+  it the boot console turns into coloured garbage a few seconds into boot and
+  goes black until `msm` takes over.
+- `0011` stops msm's DSI host from reprogramming its PLL before every panel
+  command. Without it every brightness change corrupts the next frame (garbage
+  blocks; `dsi_err_worker: status=4`, `frame done timeout`).
+- `0012` is the panel driver, `CONFIG_DRM_PANEL_SAMSUNG_S6E3FC3=m` in
+  [`config/r8q_bringup.config`](config/r8q_bringup.config).
+
+`0010` is built into the `Image`, so deploy both the `Image` and the DTB (§5).
+
+**c) Modules.** `msm.ko` already contains the DPU, DSI and DSI PHY drivers.
+Three more modules must be on the phone, and the DSI host waits forever,
+without a word, if the refgen one is missing:
+
+```bash
+for m in panel-samsung-s6e3fc3 backlight qcom-refgen-regulator; do modinfo -n $m; done
+```
+
+Install any that are missing from `$OUT` and run `depmod -a`.
+
+**d) Load order.** `r8q-gpu.service` (§9) loads `msm` once and then waits up
+to 10 s for the msm display, and sddm starts after it (§12b). If KWin started
+earlier it would open `simpledrm` just before `msm` removes it.
+
+**e) Verify** after a reboot:
+
+```bash
+dmesg | grep -E 'lcd_id|msm-kms'
+#   want: panel-samsung-s6e3fc3 ae94000.dsi.0: S6E3FC3/AMS646YD01, lcd_id 0x805081
+#         [drm] Initialized msm-kms ... for ae01000.display-controller
+ls /sys/class/backlight                           # ae94000.dsi.0
+dmesg | grep -c -E 'dsi_err|frame done timeout'   # want: 0
+```
+
+`kscreen-doctor -o` should list `1080x2400@120.00` as the current mode. If the
+KWin config still holds a custom mode from the `simpledrm` days, switch to the
+native mode and remove the custom one: its CVT timings put the DSI link at the
+wrong rate.
+
+Two rules: **never `rmmod msm`** (§9), and **never read the display block's
+registers through `/dev/mem`** once `msm` owns it — it power-gates the block,
+and an access then hard-resets the phone. The sway autologin finds the msm
+display by itself; GNOME's udev tag (`61-mutter-primary-gpu.rules`) dates from
+the `simpledrm` setup and GNOME on msm-drm is untested.
+
+To go back, put a `r8q.dtb` built without the display block on the ESP; the
+`Image` with `0010`–`0012` works with either.
 
 ## Protect the Samsung zap shader from pacman
 

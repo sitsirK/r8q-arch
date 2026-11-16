@@ -31,7 +31,7 @@ into.
 |---|-----------|-------|
 | 1 | Mainline kernel boots — BusyBox/switch-root initramfs, output on the phone screen | ✅ |
 | 2 | **UFS storage** — all LUNs and the full GPT show up as `/dev/sd*` (first try, no hacks) | ✅ |
-| 3 | **Display** — a *persistent, live* mainline framebuffer console on the AMOLED panel | ✅ |
+| 3 | **Display** — mainline `msm` (DPU + DSI) with our own S6E3FC3 panel driver: **120 Hz**, hardware brightness, real screen-off | ✅ |
 | 4 | **Arch Linux ARM + systemd** on userdata, root autologin on the panel (`tty1`) | ✅ |
 | 5 | **SSH over USB** — `ssh root@172.16.42.1`, plus **USB tethering** (internet + `pacman`) | ✅ |
 | 6 | **GPU acceleration** — Adreno 650 via freedreno/turnip (GLES 3.2 + Vulkan 1.3) | ✅ |
@@ -60,8 +60,8 @@ r8q-arch/
 ├── README.md                     ← you are here
 ├── PREREQUISITES.md              ← read first (bootloader, host packages, data wipe)
 ├── INSTALLATION.md               ← the step-by-step
-├── dts/                          ← display fix, touchscreen, battery and QCA6390 Wi-Fi nodes (sm8250-samsung-common.dtsi + r8q.dts)
-├── patches/                      ← kernel patches (GPU zap-shader; i2c FIFO force; FTS5CU56A touch driver)
+├── dts/                          ← display, touchscreen, battery and QCA6390 Wi-Fi nodes (sm8250-samsung-common.dtsi + r8q.dts)
+├── patches/                      ← kernel patches (GPU zap shader; i2c FIFO force; touch; battery/USB-C; camera; display + panel driver)
 ├── config/                       ← r8q_bringup.config, cmdline.txt
 ├── initramfs/                    ← switch-root /init (+ irfs.devnodes)
 ├── rootfs/                       ← systemd services, networkd, Plasma Mobile/sddm wiring, cpuidle workaround, gadget script, GPU + touch + battery + Wi-Fi services
@@ -100,24 +100,25 @@ ESP. Neither a kernel nor a device-tree change needs a re-flash.
 The short version of what each part needs. The details are in
 [`INSTALLATION.md`](INSTALLATION.md) and in the comments of the files named here.
 
-- **GPU** — there is no mainline panel driver yet, so the panel keeps scanning
-  out of the firmware-lit framebuffer (`simpledrm`, `card0`) and `msm` is loaded
-  after boot with `separate_gpu_kms=1` as a render-only node (`renderD128`). It
-  needs the **Samsung-signed zap shader from your own phone**, loaded into
-  dynamically allocated memory instead of the DT carveout (`msm.r8q_zap_dyn=1`,
+- **GPU** — `msm` is loaded after boot with `separate_gpu_kms=1`: the Adreno is
+  its own render node (`renderD128`), the display its own card. It needs the
+  **Samsung-signed zap shader from your own phone**, loaded into dynamically
+  allocated memory instead of the DT carveout (`msm.r8q_zap_dyn=1`,
   `patches/0001`–`0002`). `r8q-gpu.service` loads `msm` once — never unload it —
   and the display manager must start after it, or the session silently runs on
-  the CPU. Plasma Mobile finds the Adreno by itself; GNOME needs the udev tag
-  shipped in `rootfs/`. See INSTALLATION §9 and §12.
+  the CPU. See INSTALLATION §9 and §12.
 - **Touchscreen** — STM FTS5CU56A on `i2c5`, with its own small driver
   (`patches/fts5cu56a.c`) and `i2c-qcom-geni.r8q_force_fifo=1` (`patches/0003`)
   to make the bus usable. Some units carry a Zinitix ZT7650 instead;
   `patches/0007` adds it to the mainline `zinitix` driver, and one DTB covers
   both. `r8q-touch.service` loads whichever is fitted.
-- **Display & power** — `patches/0006` makes simpledrm report a DSI connector and
-  the DT gives the panel its physical size, so desktops treat it as the built-in
-  screen (touch follows rotation, scaling comes out right). **Suspend is disabled
-  on purpose**: s2idle hard-resets this SoC.
+- **Display & power** — the panel is a Samsung S6E3FC3 (command mode, DSC);
+  `patches/0012` drives it through mainline `msm` at 120 Hz with DCS
+  brightness. `patches/0010` keeps the boot console alive until `msm` takes
+  over, `patches/0011` stops msm reprogramming the DSI PLL on every panel
+  command (that corrupted frames). Check your panel first, and stage three
+  extra modules — INSTALLATION §13. **Suspend is disabled on purpose**: s2idle
+  hard-resets this SoC.
 - **Battery** — MAX77705 on `i2c0`: fuel gauge through mainline
   `max17042_battery`, charging through the `max77705` MFD + charger
   (`patches/0005` accepts the PASS2 revision this phone has). `patches/0009`

@@ -1,12 +1,17 @@
 [Unit]
-Description=r8q Adreno GPU: load msm (render-only, separate_gpu_kms) after display is up
+Description=r8q: load msm (Adreno GPU + DPU/DSI display with the S6E3FC3 panel)
 Documentation=man:modprobe(8)
 After=multi-user.target
 ConditionPathExists=!/dev/dri/renderD128
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/modprobe msm separate_gpu_kms=1
+# options (separate_gpu_kms=1, r8q_zap_*) come from /etc/modprobe.d/r8q-gpu.conf
+ExecStart=/usr/bin/modprobe msm
+# modprobe returns before udev has loaded the panel module and msm has bound the
+# display, so wait (max 10 s) for the msm_dpu DRM device before sddm/KWin start;
+# otherwise KWin can open simpledrm just before msm removes it.
+ExecStartPost=/bin/sh -c 'for i in $(seq 100); do for c in /sys/class/drm/card[0-9]*; do [ "$(basename "$(readlink -f "$c/device/driver")")" = msm_dpu ] && exit 0; done; sleep 0.1; done; echo "r8q-gpu: msm display did not appear within 10 s" >&2; exit 0'
 RemainAfterExit=yes
 
 [Install]

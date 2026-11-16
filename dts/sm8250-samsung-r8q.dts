@@ -755,3 +755,104 @@
 		};
 	};
 };
+
+/*
+ * Display: mainline msm-drm (DPU 6.0 + DSI0 + 7nm PHY) driving the panel
+ * directly, replacing simpledrm on the bootloader-lit pipe.
+ *
+ * The panel on this unit is a Samsung S6E3FC3 DDIC + AMS646YD01 (lcd_id
+ * 0x805081 per Samsung's XBL log in LOGFS). Command mode, 4 lanes, DSC 1.1
+ * (2x 540x40 slices -> DSC_0/DSC_1 merged onto INTF_1), TE on gpio66.
+ * Power: vdd3 = gpio93-switched fixed regulator (fixed_reg_octa_vdd3 in the
+ * stock dtbo); vddio (L14A) and vci (L11C) are left on by the bootloader and
+ * not described here.
+ *
+ * msm needs the display clocks and MDSS_GDSC itself, so the simpledrm-era
+ * workarounds from sm8250-samsung-common.dtsi are undone for r8q. simpledrm
+ * remains the boot console on the firmware-lit pipe until msm loads and takes
+ * the display over; that needs patches/0010, or dispcc parks the MDP clock at
+ * registration and the panel blanks a few seconds into boot.
+ * Kernel side: patches/0010-0012, panel-samsung-s6e3fc3.ko, backlight.ko and
+ * qcom-refgen-regulator.ko (the DSI refgen-supply).
+ */
+&framebuffer {
+	/delete-property/ power-domains;
+};
+
+&dispcc {
+	/delete-property/ protected-clocks;
+};
+
+/ {
+	panel_vdd3: regulator-panel-vdd3 {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_vdd3";
+		gpio = <&tlmm 93 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+
+		pinctrl-0 = <&panel_vdd3_en>;
+		pinctrl-names = "default";
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l9a_1p2>;
+
+	status = "okay";
+
+	panel@0 {
+		compatible = "samsung,s6e3fc3-ams646yd01";
+		reg = <0>;
+
+		vdd3-supply = <&panel_vdd3>;
+		reset-gpios = <&tlmm 82 GPIO_ACTIVE_LOW>;
+
+		pinctrl-0 = <&panel_reset_default>, <&panel_te_default>;
+		pinctrl-names = "default";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5a_0p88>;
+
+	status = "okay";
+};
+
+&tlmm {
+	panel_reset_default: panel-reset-default-state {
+		pins = "gpio82";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_te_default: panel-te-default-state {
+		pins = "gpio66";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_vdd3_en: panel-vdd3-en-state {
+		pins = "gpio93";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};

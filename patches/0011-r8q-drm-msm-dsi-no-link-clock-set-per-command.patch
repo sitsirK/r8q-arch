@@ -1,0 +1,40 @@
+From: r8q bring-up <r8q@localhost>
+Subject: [PATCH] r8q: drm/msm/dsi: don't reprogram the link clocks for every command
+
+msm_dsi_host_xfer_prepare() calls link_clk_set_rate() before every DSI
+command transfer. Transfers are only allowed while the host is powered on
+(dsi_host_transfer() returns -EINVAL otherwise), and then the link clocks
+already run at the rates for the current mode, so this is meant to be a
+no-op. It is not: the requested pixel clock is generally not exactly
+achievable (r8q: 184617761 Hz requested, 184617749 Hz from the 7nm PLL), so
+clk_set_rate() reprograms the DSI PLL on every command.
+
+In command mode the command lands between frames and the PLL change corrupts
+the next frame transfer: HS FIFO underflow on the data lanes
+("dsi_err_worker: status=4"), DPU frame done timeouts, and garbage blocks on
+a DSC panel. Panel brightness updates are DCS commands, so every backlight
+change (KWin fades the brightness on idle dim/undim) produced this.
+
+Only set the link clock rates when the host is not powered on yet.
+
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -2170,7 +2170,16 @@
+ 	 * mdp clock need to be enabled to receive dsi interrupt
+ 	 */
+ 	pm_runtime_get_sync(&msm_host->pdev->dev);
+-	cfg_hnd->ops->link_clk_set_rate(msm_host);
++	/*
++	 * While the host is powered on, the link clocks already run at the rates
++	 * for the current mode. Setting them again is not a no-op: the requested
++	 * pixel clock is generally not exactly achievable, so clk_set_rate()
++	 * reprograms the DSI PLL for every single command. In command mode that
++	 * happens between frames and corrupts the next frame transfer (HS FIFO
++	 * underflow, DPU frame done timeouts, garbage on DSC panels).
++	 */
++	if (!msm_host->power_on)
++		cfg_hnd->ops->link_clk_set_rate(msm_host);
+ 	cfg_hnd->ops->link_clk_enable(msm_host);
+ 
+ 	/* TODO: vote for bus bandwidth */

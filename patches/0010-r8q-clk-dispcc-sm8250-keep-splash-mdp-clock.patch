@@ -1,0 +1,26 @@
+From: r8q bring-up <r8q@localhost>
+Subject: [PATCH] r8q: clk: qcom: dispcc-sm8250: don't park the MDP clock at registration
+
+disp_cc_mdss_mdp_clk_src uses clk_rcg2_shared_ops, whose .init parks the RCG
+on XO (19.2 MHz) as soon as dispcc registers. On a phone whose bootloader left
+the display running (r8q: Samsung XBL lights the S6E3FC3 panel in command mode
+with DSC and autorefresh), that starves the DPU a few seconds into boot: the
+DSI link sends garbage, the panel shows a flash of colours and then blanks
+itself (its TE output stops) until msm re-initialises everything.
+
+Use clk_rcg2_shared_no_init_park_ops, as dispcc-sc8280xp and dispcc-x1e80100
+already do for their MDP clocks, so the boot console keeps scanning out
+until msm takes over.
+
+---
+--- a/drivers/clk/qcom/dispcc-sm8250.c
++++ b/drivers/clk/qcom/dispcc-sm8250.c
+@@ -565,7 +565,7 @@
+ 		.parent_data = disp_cc_parent_data_5,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_5),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 

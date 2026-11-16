@@ -1,0 +1,470 @@
+From: r8q bring-up <r8q@localhost>
+Subject: [PATCH] r8q: drm/panel: add Samsung S6E3FC3 AMS646YD01 panel driver
+
+The Galaxy S20 FE 5G (r8q) uses one of three panels; this unit has the
+S6E3FC3 DDIC with the AMS646YD01 1080x2400 AMOLED (lcd_id 0x805081).
+MIPI DSI command mode, 4 lanes, DSC 1.1 (8 bpc, 8 bpp, 540x40 slices, two per
+line), TE on a dedicated pin, 120 Hz.
+
+The init sequence is the one Samsung's XBL sends to this panel. XBL logs
+every MIPI packet to the LOGFS partition (UefiLog1.txt), and that differs in
+a few registers from the generic qcom,mdss-dsi-on-command in the vendor DT
+(FFC for the 1108 Mbps lane rate, 0xe5/0xcc/0x63, and 0x60 0x08 0x00 to select
+120 Hz). The driver reads the panel ID (DA/DB/DC) on power-up, packs the PPS
+from msm's DSC parameters (identical to the vendor PPS), registers a backlight
+device for DCS brightness (0..1023) and powers the panel fully down on
+disable (sleep in, reset, vdd3 off).
+
+---
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -901,6 +901,19 @@
+ 
+ 	    Samsung AMS641RW (found in the OnePlus 6T smartphone)
+ 
++config DRM_PANEL_SAMSUNG_S6E3FC3
++	tristate "Samsung S6E3FC3 AMS646YD01 DSI command mode panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_DSC_HELPER
++	select DRM_DISPLAY_HELPER
++	help
++	  Say Y or M here if you want to enable support for the Samsung
++	  AMS646YD01 1080x2400 AMOLED panel driven by an S6E3FC3 DDIC, found
++	  in the Samsung Galaxy S20 FE 5G (r8q). MIPI DSI command mode with
++	  DSC, 120 Hz, DCS brightness.
++
+ config DRM_PANEL_SAMSUNG_S6E3HA2
+ 	tristate "Samsung S6E3HA2 DSI video mode panel"
+ 	depends on OF
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -88,6 +88,7 @@
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D7AA0) += panel-samsung-s6d7aa0.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FA7) += panel-samsung-s6e3fa7.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FC2X01) += panel-samsung-s6e3fc2x01.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FC3) += panel-samsung-s6e3fc3.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2) += panel-samsung-s6e3ha2.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA8) += panel-samsung-s6e3ha8.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63J0X03) += panel-samsung-s6e63j0x03.o
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3fc3.c
+@@ -0,0 +1,417 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S6E3FC3 DDIC with the AMS646YD01 6.46" 1080x2400 AMOLED panel,
++ * as fitted to the Galaxy S20 FE 5G (r8q, SM8250).
++ *
++ * MIPI DSI command mode, 4 lanes, DSC 1.1 (8 bpc, 8 bpp, 540x40 slices, two
++ * per line), tearing effect on a dedicated pin. 120 Hz.
++ *
++ * The init sequence is the one Samsung's XBL DisplayDxe sends to this exact
++ * panel (it logs every MIPI packet to the LOGFS partition), which differs in a
++ * few registers from the generic qcom,mdss-dsi-on-command in the vendor DT:
++ * FFC tuned for the 1108 Mbps lane rate, 0xe5/0xcc/0x63 values, and the
++ * 0x60 0x08 0x00 frequency select that puts the panel in its 120 Hz mode.
++ * The bootloader identifies it by DA/DB/DC = 0x80 0x50 0x81 (lcd_id 0x805081,
++ * matched against mask 0x805080).
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <video/mipi_display.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++#define S6E3FC3_MAX_BRIGHTNESS	1023
++
++static bool use_vendor_pps;
++module_param(use_vendor_pps, bool, 0644);
++MODULE_PARM_DESC(use_vendor_pps,
++		 "Send the bootloader's PPS bytes instead of the one computed for the DSC encoder (debug)");
++
++struct s6e3fc3 {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct regulator *vdd3;
++	struct gpio_desc *reset_gpio;
++	struct backlight_device *bl;
++	bool prepared;
++};
++
++static inline struct s6e3fc3 *to_s6e3fc3(struct drm_panel *panel)
++{
++	return container_of(panel, struct s6e3fc3, panel);
++}
++
++#define s6e3fc3_key_lvl1_on(ctx)  mipi_dsi_dcs_write_seq_multi(ctx, 0x9f, 0xa5, 0xa5)
++#define s6e3fc3_key_lvl1_off(ctx) mipi_dsi_dcs_write_seq_multi(ctx, 0x9f, 0x5a, 0x5a)
++#define s6e3fc3_key_lvl2_on(ctx)  mipi_dsi_dcs_write_seq_multi(ctx, 0xf0, 0x5a, 0x5a)
++#define s6e3fc3_key_lvl2_off(ctx) mipi_dsi_dcs_write_seq_multi(ctx, 0xf0, 0xa5, 0xa5)
++#define s6e3fc3_key_lvl3_on(ctx)  mipi_dsi_dcs_write_seq_multi(ctx, 0xfc, 0x5a, 0x5a)
++#define s6e3fc3_key_lvl3_off(ctx) mipi_dsi_dcs_write_seq_multi(ctx, 0xfc, 0xa5, 0xa5)
++
++/* Picture parameter set exactly as the bootloader sends it (vendor DT). */
++static const u8 s6e3fc3_vendor_pps[] = {
++	0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x09, 0x60, 0x04, 0x38, 0x00, 0x28,
++	0x02, 0x1c, 0x02, 0x1c, 0x02, 0x00, 0x02, 0x0e, 0x00, 0x20, 0x03, 0xdd,
++	0x00, 0x07, 0x00, 0x0c, 0x02, 0x77, 0x02, 0x8b, 0x18, 0x00, 0x10, 0xf0,
++	0x03, 0x0c, 0x20, 0x00, 0x06, 0x0b, 0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38,
++	0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d, 0x7e, 0x01, 0x02,
++	0x01, 0x00, 0x09, 0x40, 0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++	0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6, 0x2b, 0x34, 0x2b, 0x74,
++	0x3b, 0x74, 0x6b, 0xf4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++};
++static_assert(sizeof(s6e3fc3_vendor_pps) == sizeof(struct drm_dsc_picture_parameter_set));
++
++static void s6e3fc3_reset(struct s6e3fc3 *ctx)
++{
++	/* qcom,mdss-dsi-reset-sequence = <0 10 1 10> */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++}
++
++static void s6e3fc3_read_id(struct s6e3fc3 *ctx)
++{
++	static const u8 regs[] = { 0xda, 0xdb, 0xdc };
++	struct device *dev = &ctx->dsi->dev;
++	u8 id[3] = { };
++	u32 lcd_id;
++	ssize_t ret;
++	int i;
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++	for (i = 0; i < ARRAY_SIZE(regs); i++) {
++		ret = mipi_dsi_dcs_read(ctx->dsi, regs[i], &id[i], 1);
++		if (ret < 0) {
++			dev_warn(dev, "reading ID register 0x%02x failed: %zd\n", regs[i], ret);
++			break;
++		}
++	}
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	if (i < ARRAY_SIZE(regs))
++		return;
++
++	lcd_id = id[0] << 16 | id[1] << 8 | id[2];
++	if ((lcd_id & 0x805080) == 0x805080)
++		dev_info(dev, "S6E3FC3/AMS646YD01, lcd_id 0x%06x\n", lcd_id);
++	else
++		dev_warn(dev, "lcd_id 0x%06x is not an S6E3FC3/AMS646YD01, init may not work\n",
++			 lcd_id);
++}
++
++static void s6e3fc3_send_pps(struct s6e3fc3 *ctx, struct mipi_dsi_multi_context *dsi_ctx)
++{
++	struct drm_dsc_picture_parameter_set pps;
++	static bool reported;
++
++	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
++
++	if (!reported && memcmp(&pps, s6e3fc3_vendor_pps, sizeof(pps))) {
++		const u8 *p = (const u8 *)&pps;
++		int i, shown = 0;
++
++		for (i = 0; i < sizeof(pps) && shown < 8; i++) {
++			if (p[i] == s6e3fc3_vendor_pps[i])
++				continue;
++			dev_info(&ctx->dsi->dev, "PPS byte %d: computed 0x%02x, vendor 0x%02x\n",
++				 i, p[i], s6e3fc3_vendor_pps[i]);
++			shown++;
++		}
++		reported = true;
++	}
++
++	if (use_vendor_pps)
++		memcpy(&pps, s6e3fc3_vendor_pps, sizeof(pps));
++
++	mipi_dsi_picture_parameter_set_multi(dsi_ctx, &pps);
++}
++
++static int s6e3fc3_on(struct s6e3fc3 *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	u16 br = ctx->bl ? backlight_get_brightness(ctx->bl) : S6E3FC3_MAX_BRIGHTNESS;
++	u8 bl_cmd[] = { MIPI_DCS_SET_DISPLAY_BRIGHTNESS, br >> 8, br & 0xff };
++
++	/* vendor: qcom,mdss-dsi-on-command-state = "dsi_hs_mode" */
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 40);
++
++	s6e3fc3_key_lvl2_on(&dsi_ctx);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2,
++				     0x00, 0x05, 0x0e, 0x58, 0x54, 0x01, 0x0c, 0x00,
++				     0x04, 0x27, 0x24, 0x2f, 0xb0, 0x0c, 0x09, 0x74,
++				     0x26, 0xe4, 0x0c, 0x00, 0x04, 0x10, 0x00, 0x10,
++				     0x26, 0xa8, 0x10, 0x00, 0x10, 0x10, 0x34, 0x10,
++				     0x00, 0x40, 0x30, 0xc8, 0x00, 0xc8, 0x00, 0x00,
++				     0xce);
++	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
++	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0, 1080 - 1);
++	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0, 2400 - 1);
++
++	/* FFC for a 1108 Mbps lane rate */
++	s6e3fc3_key_lvl3_on(&dsi_ctx);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x2a, 0xc5);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc5, 0x0d, 0x10, 0x80, 0x45);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x2e, 0xc5);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc5, 0x53, 0xc7);
++	s6e3fc3_key_lvl3_off(&dsi_ctx);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe5, 0x05);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xed, 0x44, 0x4c, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x04, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x54);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xcc, 0x5c, 0x50);
++
++	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
++	s6e3fc3_send_pps(ctx, &dsi_ctx);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x27, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x2e, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x55);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x91, 0x63);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x63, 0x60);
++	/* frequency select: 0x08 = 120 Hz (TE measured at 119.9 Hz after XBL) */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x08, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00, 0x28, 0x68);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x68, 0x02);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x02, 0x01);
++	/* brightness control block on, then the current backlight level */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, bl_cmd, sizeof(bl_cmd));
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x0f);
++	s6e3fc3_key_lvl2_off(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 90);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3fc3_prepare(struct drm_panel *panel)
++{
++	struct s6e3fc3 *ctx = to_s6e3fc3(panel);
++	struct device *dev = &ctx->dsi->dev;
++	int ret;
++
++	ret = regulator_enable(ctx->vdd3);
++	if (ret < 0) {
++		dev_err(dev, "failed to enable vdd3: %d\n", ret);
++		return ret;
++	}
++	usleep_range(10000, 11000);
++
++	s6e3fc3_reset(ctx);
++	s6e3fc3_read_id(ctx);
++
++	ret = s6e3fc3_on(ctx);
++	if (ret < 0) {
++		dev_err(dev, "failed to initialize panel: %d\n", ret);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		regulator_disable(ctx->vdd3);
++		return ret;
++	}
++
++	ctx->prepared = true;
++	return 0;
++}
++
++static int s6e3fc3_enable(struct drm_panel *panel)
++{
++	struct s6e3fc3 *ctx = to_s6e3fc3(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	/* samsung,display_on_tx_cmds_revA */
++	s6e3fc3_key_lvl1_on(&dsi_ctx);
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++	s6e3fc3_key_lvl1_off(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3fc3_disable(struct drm_panel *panel)
++{
++	struct s6e3fc3 *ctx = to_s6e3fc3(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	/* qcom,mdss-dsi-off-command */
++	s6e3fc3_key_lvl1_on(&dsi_ctx);
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 20);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 120);
++	s6e3fc3_key_lvl1_off(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3fc3_unprepare(struct drm_panel *panel)
++{
++	struct s6e3fc3 *ctx = to_s6e3fc3(panel);
++
++	ctx->prepared = false;
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	regulator_disable(ctx->vdd3);
++
++	return 0;
++}
++
++/*
++ * Vendor 120 Hz timing, except hfp: padded 80 -> 104 so that the DSC-adjusted
++ * link rate msm derives from the mode ((636 / 1356) * clock * 24 bpp / 4 lanes)
++ * lands on the 1108 Mbps that the FFC values above are tuned for. Porches are
++ * otherwise meaningless to a command-mode panel.
++ */
++static const struct drm_display_mode s6e3fc3_mode = {
++	.clock = (1080 + 104 + 84 + 88) * (2400 + 15 + 2 + 2) * 120 / 1000,
++	.hdisplay = 1080,
++	.hsync_start = 1080 + 104,
++	.hsync_end = 1080 + 104 + 84,
++	.htotal = 1080 + 104 + 84 + 88,
++	.vdisplay = 2400,
++	.vsync_start = 2400 + 15,
++	.vsync_end = 2400 + 15 + 2,
++	.vtotal = 2400 + 15 + 2 + 2,
++	.width_mm = 67,
++	.height_mm = 150,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
++static int s6e3fc3_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &s6e3fc3_mode);
++}
++
++static const struct drm_panel_funcs s6e3fc3_panel_funcs = {
++	.prepare = s6e3fc3_prepare,
++	.enable = s6e3fc3_enable,
++	.disable = s6e3fc3_disable,
++	.unprepare = s6e3fc3_unprepare,
++	.get_modes = s6e3fc3_get_modes,
++};
++
++static int s6e3fc3_bl_update_status(struct backlight_device *bl)
++{
++	struct s6e3fc3 *ctx = bl_get_data(bl);
++
++	/* applied by s6e3fc3_on() at the next power-up */
++	if (!ctx->prepared)
++		return 0;
++
++	return mipi_dsi_dcs_set_display_brightness_large(ctx->dsi,
++							 backlight_get_brightness(bl));
++}
++
++static const struct backlight_ops s6e3fc3_bl_ops = {
++	.update_status = s6e3fc3_bl_update_status,
++};
++
++static int s6e3fc3_probe(struct mipi_dsi_device *dsi)
++{
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = S6E3FC3_MAX_BRIGHTNESS,
++		.max_brightness = S6E3FC3_MAX_BRIGHTNESS,
++	};
++	struct device *dev = &dsi->dev;
++	struct s6e3fc3 *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct s6e3fc3, panel, &s6e3fc3_panel_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ctx->vdd3 = devm_regulator_get(dev, "vdd3");
++	if (IS_ERR(ctx->vdd3))
++		return dev_err_probe(dev, PTR_ERR(ctx->vdd3), "failed to get vdd3\n");
++
++	/* the bootloader leaves the panel running: keep it out of reset */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio), "failed to get reset-gpios\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	/* no qcom,mdss-dsi-force-clock-lane-hs; qcom,mdss-dsi-tx-eot-append */
++	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	/* qcom,mdss-dsi-lp11-init */
++	ctx->panel.prepare_prev_first = true;
++
++	ctx->bl = devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
++						 &s6e3fc3_bl_ops, &props);
++	if (IS_ERR(ctx->bl))
++		return dev_err_probe(dev, PTR_ERR(ctx->bl), "failed to register backlight\n");
++	ctx->panel.backlight = ctx->bl;
++
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++	ctx->dsc.slice_height = 40;
++	ctx->dsc.slice_width = 540;
++	ctx->dsc.slice_count = 1080 / 540;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
++	ctx->dsc.block_pred_enable = true;
++	dsi->dsc = &ctx->dsc;
++
++	drm_panel_add(&ctx->panel);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		dev_err(dev, "failed to attach to DSI host: %d\n", ret);
++		drm_panel_remove(&ctx->panel);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void s6e3fc3_remove(struct mipi_dsi_device *dsi)
++{
++	struct s6e3fc3 *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id s6e3fc3_of_match[] = {
++	{ .compatible = "samsung,s6e3fc3-ams646yd01" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, s6e3fc3_of_match);
++
++static struct mipi_dsi_driver s6e3fc3_driver = {
++	.probe = s6e3fc3_probe,
++	.remove = s6e3fc3_remove,
++	.driver = {
++		.name = "panel-samsung-s6e3fc3",
++		.of_match_table = s6e3fc3_of_match,
++	},
++};
++module_mipi_dsi_driver(s6e3fc3_driver);
++
++MODULE_DESCRIPTION("DRM driver for the Samsung S6E3FC3 AMS646YD01 panel (Galaxy S20 FE)");
++MODULE_LICENSE("GPL");
