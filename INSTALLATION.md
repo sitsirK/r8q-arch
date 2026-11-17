@@ -25,11 +25,19 @@ Sway are tested). It **erases `userdata`** and formats `cache` as the ESP; the
 partition table is not changed.
 
 **UEFI with SD-card support.** Upstream Mu-Silicium does not see the SD card on
-this phone. Build §2 from
-[sitsirK/Mu-Silicium](https://github.com/sitsirK/Mu-Silicium) with branches
-`sd-card-power` (powers the slot) and `sd-card-boot-option` (adds "SD Card" to
-the boot menu) merged; `r8q.dtb` from the release can stand in for a DTB you
-built. Flash it (§3).
+this phone. Build the `r8q` branch of
+[sitsirK/Mu-Silicium](https://github.com/sitsirK/Mu-Silicium/tree/r8q): upstream
+plus SD-slot power, an "SD Card" boot-menu entry and the release's device tree,
+ready to build (Linux, ~5 GB of source):
+
+```bash
+git clone --recursive -b r8q https://github.com/sitsirK/Mu-Silicium.git
+cd Mu-Silicium
+./setup_env.sh -p pacman              # or apt / dnf: compilers, mono, nasm, pip packages
+python3 build_uefi.py -d r8q          # -> Mu-r8q.img
+```
+
+Flash `Mu-r8q.img` (§3). The boot menu now lists **SD Card**.
 
 **The card.** Download `alarminstall-r8q-<date>.iso` and `SHA256SUMS` from this
 repository's Releases, then:
@@ -102,12 +110,14 @@ Outputs: `$OUT/arch/arm64/boot/Image` and
 Mu-Silicium carries a copy of the DTB **inside the firmware** and exposes it via
 `DtPlatformDxe`. (The kernel does not boot from this copy — it loads `r8q.dtb`
 from the ESP, see step 5 — so later device-tree changes do not need a re-flash.)
-Enable the "Device Tree" FREEFORM block in
-`$MUSIL/Platforms/Samsung/r8qPkg/r8q.fdf`, then:
+Use the `r8q` branch of sitsirK/Mu-Silicium (§0): it adds SD-card support and
+already enables the "Device Tree" FREEFORM block in
+`$MUSIL/Platforms/Samsung/r8qPkg/r8q.fdf` (on upstream, un-comment it yourself).
+To embed the DTB you built:
 
 ```bash
 MUSIL=$MUSIL DTB=$OUT/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb ./scripts/build-uefi.sh
-# -> $MUSIL/Mu-r8q-0.img
+# -> $MUSIL/Mu-r8q.img
 ```
 
 ## 3. Flash UEFI to BOOT
@@ -115,7 +125,7 @@ MUSIL=$MUSIL DTB=$OUT/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb ./scripts/
 Put the phone in **download mode** (power off; VolUp+VolDown; plug USB):
 
 ```bash
-./scripts/flash.sh $MUSIL/Mu-r8q-0.img       # heimdall flash --BOOT ...; it reboots
+./scripts/flash.sh $MUSIL/Mu-r8q.img         # heimdall flash --BOOT ...; it reboots
 ```
 
 The phone now boots Mu-Silicium UEFI on every power-on.

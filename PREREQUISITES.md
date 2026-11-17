@@ -26,7 +26,8 @@
 
 ## Sources you'll clone
 - **Mainline Linux** (7.1.2 was used here): the r8q DT is upstream since v6.18.
-- **Mu-Silicium** — `github.com/Project-Silicium/Mu-Silicium` (has `r8qPkg`).
+- **Mu-Silicium** — `github.com/sitsirK/Mu-Silicium`, branch `r8q`: upstream
+  (`Project-Silicium/Mu-Silicium`) plus SD-card support and the r8q device tree.
 - **Arch Linux ARM** aarch64 rootfs tarball (downloaded by `install-arch.sh`).
 
 ## Key combos

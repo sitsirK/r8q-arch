@@ -11,7 +11,9 @@ set -euo pipefail
 MUSIL="${MUSIL:?set MUSIL to your Mu-Silicium checkout}"
 DTB="${DTB:?set DTB to out/arch/arm64/boot/dts/qcom/sm8250-samsung-r8q.dtb}"
 VENV="${VENV:-$MUSIL/../.venv}"   # python venv with Mu-Silicium pip-requirements
+PY="$VENV/bin/python"; [ -x "$PY" ] || PY=python3   # setup_env.sh installs them system-wide
 
+mkdir -p "$MUSIL/Platforms/Samsung/r8qPkg/FdtBlob"
 cp "$DTB" "$MUSIL/Platforms/Samsung/r8qPkg/FdtBlob/sm8250-samsung-r8q.dtb"
-( cd "$MUSIL" && "$VENV/bin/python" build_uefi.py -d r8q )
-echo "[+] $MUSIL/Mu-r8q-0.img built (embeds the display-fix DTB). Flash with scripts/flash.sh"
+( cd "$MUSIL" && "$PY" build_uefi.py -d r8q )
+echo "[+] $MUSIL/Mu-r8q.img built (embeds the display-fix DTB). Flash with scripts/flash.sh"
