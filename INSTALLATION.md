@@ -452,10 +452,13 @@ systemd-run --unit=install --collect pacman -S plasma-mobile plasma-settings ksc
 ```
 
 **a) Stop PowerDevil from suspending — do this BEFORE the first login.** Suspend
-is a hard reset on this device (see the sleep-target masking earlier), and
-PowerDevil will happily idle-suspend into it.
+is a hard reset on this device, and PowerDevil will happily idle-suspend into
+it. Mask systemd's sleep targets (alarminstall does the same) and give
+PowerDevil a configuration that never asks for them:
 
 ```bash
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target \
+               suspend-then-hibernate.target
 for f in powerdevilrc powermanagementprofilesrc kscreenlockerrc; do
   install -Dm644 rootfs/etc/xdg/$f /etc/xdg/$f
 done
@@ -601,13 +604,7 @@ NoUpgrade = usr/lib/firmware/qcom/sm8250/a650_zap.mbn
 pacman will drop the upstream file as `.pacnew` instead. Verify at any time with
 `md5sum /usr/lib/firmware/qcom/sm8250/a650_zap.mbn` against your saved copy.
 
-Two more things that bite on a fresh ALARM rootfs:
-
-- `/` and `/usr` may be owned by `alarm` (a tarball-extraction artifact, same as
-  `/etc`). `systemd-tmpfiles` then fails during package installs with
-  `Detected unsafe path transition / (owned by alarm) → /dev`. Fix once with
-  `chown root:root / /usr && chmod 755 /`.
-- **`systemctl reboot` does not come back by itself.** Returning to Linux needs
-  the physical **VolUp+Power with USB connected** combo, so never reboot a phone
-  that nobody can reach. (Mu-Silicium is on `BOOT`, as flashed in step 3; the
-  stock `RECOVERY` partition is left alone.)
+One more thing that bites on a fresh ALARM rootfs: `/` and `/usr` may be owned
+by `alarm` (a tarball-extraction artifact, same as `/etc`). `systemd-tmpfiles`
+then fails during package installs with `Detected unsafe path transition /
+(owned by alarm) → /dev`. Fix once with `chown root:root / /usr && chmod 755 /`.
