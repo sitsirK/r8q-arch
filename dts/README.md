@@ -17,6 +17,10 @@ fixed regulator), and deletes the two `simpledrm` workarounds below, because
 and three modules; see INSTALLATION §13, including how to check which of the
 r8q's three panels you have.
 
+**`sm8250-samsung-r8q-simpledrm.dts`** builds the same tree without that block
+(`#define R8Q_SIMPLEDRM`), for the panels without a driver: the screen stays on
+the firmware framebuffer through `simpledrm`, as described next.
+
 **`sm8250-samsung-common.dtsi` — the `simpledrm` setup** (still what the
 common file describes, and what you keep on a panel without a driver). It keeps
 the firmware-lit framebuffer alive:

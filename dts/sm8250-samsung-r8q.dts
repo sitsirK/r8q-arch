@@ -774,7 +774,12 @@
  * registration and the panel blanks a few seconds into boot.
  * Kernel side: patches/0010-0012, panel-samsung-s6e3fc3.ko, backlight.ko and
  * qcom-refgen-regulator.ko (the DSI refgen-supply).
+ *
+ * sm8250-samsung-r8q-simpledrm.dts builds this tree without the block, for
+ * panels that have no driver (EA8079B, EA8076A): simpledrm keeps the firmware
+ * framebuffer, as before.
  */
+#ifndef R8Q_SIMPLEDRM
 &framebuffer {
 	/delete-property/ power-domains;
 };
@@ -856,3 +861,4 @@
 		bias-disable;
 	};
 };
+#endif /* R8Q_SIMPLEDRM */

@@ -5,10 +5,10 @@
 #
 # WARNING: DESTROYS the userdata partition (Android / any prior Linux install).
 #
-# Env: KV=<kernel release, e.g. 7.1.2>  OUT=<kernel build dir>  KSRC=<kernel source dir>
+# Env: KV=<kernel release, e.g. 7.3.5>  OUT=<kernel build dir>  KSRC=<kernel source dir>
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"          # repo root
-KV="${KV:?set KV to the kernel release (e.g. 7.1.2)}"
+KV="${KV:?set KV to the kernel release (e.g. 7.3.5)}"
 OUT="${OUT:?set OUT to your kernel build dir (has modules)}"
 KSRC="${KSRC:?set KSRC to the kernel source dir}"
 MNT="${MNT:-/mnt/r8qroot}"

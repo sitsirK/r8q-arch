@@ -51,7 +51,7 @@ audio, a greeter/lock screen).
 
 Mu-Silicium is
 flashed to `BOOT`; the ESP is the `cache` partition reformatted vfat (`R8QESP`);
-the rootfs is the `userdata` partition; the kernel is mainline **Linux 7.1.2**.
+the rootfs is the `userdata` partition; the kernel is mainline **Linux 7.3.5**.
 
 ---
 

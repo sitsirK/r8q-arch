@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Samsung Galaxy S20 FE 5G (r8q) with the display left to simpledrm: the
+ * framebuffer the bootloader lit, at 60 Hz, no brightness control. For the
+ * r8q panels without a driver (EA8079B, EA8076A); on the S6E3FC3 use
+ * sm8250-samsung-r8q.dtb (msm-drm, 120 Hz). The same kernel runs with either.
+ */
+#define R8Q_SIMPLEDRM
+#include "sm8250-samsung-r8q.dts"

@@ -6,7 +6,7 @@ first — **this wipes `userdata`.**
 
 Throughout: `$KSRC` = your mainline kernel source, `$OUT` = its build dir
 (`O=`), `$MUSIL` = your Mu-Silicium checkout. `KV` is the kernel release (e.g.
-`7.1.2`).
+`7.3.5`).
 
 Two ways in:
 - **The alarminstall image** (next section): flash UEFI once (§2–3), boot the
@@ -55,6 +55,14 @@ versions side by side are fine).
 Vol-Down** move (hold to scroll), **Power** selects. Choices are marked: plain =
 tested, yellow = untested, red and struck through = not supported yet.
 
+Two choices are r8q-specific. **Phone → Display**: *msm-drm* (§13: 120 Hz,
+brightness, real screen-off) needs the S6E3FC3 panel, and the installer reads
+which panel yours is from the bootloader's log; *simpledrm* works with every
+panel. **Kernels → latest kernel** is experimental: the phone downloads the
+newest stable kernel from kernel.org, applies [`patches/`](patches/) and builds
+it itself at the end of the install (30–60 min). If anything fails, the tested
+kernel stays.
+
 **Get online.** Packages are downloaded during the install, and the phone has
 no keyboard for a Wi-Fi password. Plug it into a PC (the PC gets an address over
 USB; the bar at the bottom of the phone's screen shows where to connect):
@@ -82,8 +90,9 @@ GPU zap shader is not on it: the installer copies it from your phone (§9).
 
 ## 1. Build the kernel (Image + DTB)
 
-Drop the two device-tree files from [`dts/`](dts/) into
-`$KSRC/arch/arm64/boot/dts/qcom/` (they carry the display fix).
+Drop the device-tree files from [`dts/`](dts/) into
+`$KSRC/arch/arm64/boot/dts/qcom/` (they carry the display fix; the
+`-simpledrm` one is for panels without a driver, §13).
 `build_kernel.sh` also applies the kernel patches from [`patches/`](patches/)
 (required for the display driver and GPU acceleration later — harmless
 otherwise). Then:
@@ -176,7 +185,7 @@ mass-storage mode.
 Still in mass-storage mode (this **formats userdata**):
 
 ```bash
-KV=7.1.2 OUT=$OUT KSRC=$KSRC ./scripts/install-arch.sh
+KV=7.3.5 OUT=$OUT KSRC=$KSRC ./scripts/install-arch.sh
 ```
 
 It extracts Arch Linux ARM, **moves the kernel module tree aside** (cold-plugging
@@ -533,9 +542,10 @@ grep -a -o 'dsi_display0=ss_dsi_panel_[A-Z0-9_]*' /mnt/logfs/UefiLog1.txt | tail
 umount /mnt/logfs
 ```
 
-On an EA8079B or EA8076A panel, stop here and keep the `simpledrm` setup (leave
-out the display block of the device tree). The vendor dtbo carries their init
-sequences too, so a driver for them is mostly transcription.
+On an EA8079B or EA8076A panel, stop here and keep the `simpledrm` setup: put
+`sm8250-samsung-r8q-simpledrm.dtb` on the ESP as `r8q.dtb` (the same tree
+without the display block). The vendor dtbo carries their init sequences too,
+so a driver for them is mostly transcription.
 
 **b) Kernel and device tree.** `build_kernel.sh` applies all three patches, and
 the display block sits at the end of
@@ -587,7 +597,7 @@ and an access then hard-resets the phone. The sway autologin finds the msm
 display by itself; GNOME's udev tag (`61-mutter-primary-gpu.rules`) dates from
 the `simpledrm` setup and GNOME on msm-drm is untested.
 
-To go back, put a `r8q.dtb` built without the display block on the ESP; the
+To go back, put `sm8250-samsung-r8q-simpledrm.dtb` on the ESP as `r8q.dtb`; the
 `Image` with `0010`–`0012` works with either.
 
 ## Protect the Samsung zap shader from pacman
