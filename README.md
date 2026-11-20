@@ -39,10 +39,12 @@ into.
 | 8 | **Touchscreen** — STM FTS5CU56A multitouch, working under Plasma Mobile and GNOME; the Zinitix ZT7650 variant works too | ✅ |
 | 9 | **Faster boot** — console `loglevel=3` (dropped `ignore_loglevel`) + a printk sysctl the initramfs can't override; ~12 s to userspace | ✅ |
 | 10 | **Volume-Up key** — remapped to `pm8150l_gpios` gpio3, emits `KEY_VOLUMEUP` | ✅ |
-| 11 | **Battery** — MAX77705 fuel gauge (`max17042`) telemetry **+ charging** (`max77705` MFD + charger) | ✅ |
+| 11 | **Battery** — MAX77705 fuel gauge (`max17042`) telemetry **+ charging** (`max77705` MFD + charger); input current set from the detected USB port type (1.5 A wall charger, 700 mA PC) | ✅ |
 | 12 | **Wi-Fi** — QCA6390 over PCIe via `ath11k_pci` + MHI; `wlp1s0` scans and associates | ✅ |
 | 13 | **KDE Plasma Mobile** — `sddm` autologin → mobile shell on the Adreno, ~12 s cold boot (GNOME still installed as a fallback) | ✅ |
-| 14 | **CPU wedge** — every so often one core stops executing and takes the phone down with it. Localised (any core, A55 or A77; it stops in the cpuidle governor, before WFI) but **not fixed**; disabling the deep idle state only makes it rarer | ⚠️ open — see [`INSTALLATION.md` §11](INSTALLATION.md) |
+| 14 | **Camera** — rear telephoto (SK hynix Hi-847) through CAMSS and libcamera's software ISP, in plasma-camera; the other three cameras and autofocus are not done | ✅ |
+| 15 | **microSD card** — up to 100 MHz (UHS SDR104, capped); a card inserted or removed while running is picked up within a second | ✅ |
+| 16 | **CPU wedge** — every so often one core stops executing and takes the phone down with it. Localised (any core, A55 or A77; it stops in the cpuidle governor, before WFI) but **not fixed**; disabling the deep idle state only makes it rarer | ⚠️ open — see [`INSTALLATION.md` §11](INSTALLATION.md) |
 
 See the [**Roadmap**](#roadmap) below for what's next (Bluetooth, USB host mode,
 audio, a greeter/lock screen).
